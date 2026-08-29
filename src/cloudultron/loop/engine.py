@@ -39,7 +39,7 @@ from enum import Enum
 from typing import Any, Callable, Sequence
 
 from ..errors import CloudultronError, DeviceError, GuardViolation, HierarchyUnavailable, PolicyError
-from ..safety import Guard, describe_verdict
+from ..safety import Guard, describe_verdict, guard_from_config
 from ..ui.hashing import LoopDetector, compare, content_hash, structure_hash
 from ..ui.render import index_screen, render_digest
 from .actions import Action, Dispatcher, Op
@@ -121,6 +121,12 @@ class RunReport:
     final_window: str = ""
     structure_changes: int = 0
     trace_path: str = ""
+    #: Which ruleset gated this run, and whether the operator waived it. Recorded
+    #: so a trace file is interpretable without knowing how it was launched.
+    guard_profile: str = ""
+    operator_mode: bool = False
+    #: Count of actions the profile objected to and the operator arming allowed.
+    operator_overrides: int = 0
     warnings: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -132,6 +138,14 @@ class RunReport:
             f"blocked={self.blocked}" if self.blocked else None,
             f"failed={self.failed}" if self.failed else None,
             f"changes={self.structure_changes}",
+            # The ruleset belongs in the summary line: two runs that look
+            # identical but armed different profiles did different things, and
+            # "blocked=0" alone cannot tell you whether that was safety or luck.
+            f"guard={self.guard_profile}(overrides={self.operator_overrides})"
+            if self.operator_mode
+            else f"guard={self.guard_profile}"
+            if self.guard_profile != "explore"
+            else None,
             f"{self.elapsed_s:.1f}s",
         ]
         line = " ".join(b for b in bits if b)
@@ -157,7 +171,9 @@ class Executor:
         self.device = device
         self.policy = policy
         self.config = config
-        self.guard = guard or Guard(dry_run=config.dry_run)
+        # Built from config when not supplied, so a library caller cannot get the
+        # CLI's strict defaults while believing it asked for a profile.
+        self.guard = guard if guard is not None else guard_from_config(config)
         self.clock = clock
         self.sleeper = sleeper
         self.on_step = on_step
@@ -360,26 +376,37 @@ class Executor:
         except Exception:  # noqa: BLE001 - cosmetic
             record.target = ""
 
+        # One gate for both paths. Classifying and gating in the same place is
+        # what lets operator mode record the objection it waived: the verdict is
+        # produced once, and ``overridden`` survives into the trace.
         if action.op is Op.RAW_SHELL:
             verdict = self.guard.check_shell(str(action.args.get("command", "")))
+            if verdict.overridden:
+                report.operator_overrides += 1
+        elif action.is_mutation:
+            verdict = self.guard.check_typed(action.effect, action.describe())
+        else:
+            verdict = None
+
+        if verdict is not None:
             record.guard = describe_verdict(verdict)
             if not verdict.allowed:
+                if verdict.deferred:
+                    # Dry-run: the *plan* is the result, and it is recorded as such.
+                    record.outcome = StepOutcome.PLANNED.value
+                    record.detail = f"[dry-run] would have: {action.describe()}"
+                    report.planned += 1
+                    self._remember(record, action, "planned")
+                    return None
                 record.outcome = StepOutcome.BLOCKED.value
                 record.detail = verdict.reason
                 report.blocked += 1
                 self._remember(record, action, "blocked")
                 return None
-
-        if action.is_mutation:
-            check = self.guard.check_typed(action.effect, action.describe())
-            record.guard = describe_verdict(check)
-            if not check.allowed:
-                # Dry-run: the *plan* is the result, and it is recorded as such.
-                record.outcome = StepOutcome.PLANNED.value
-                record.detail = f"[dry-run] would have: {action.describe()}"
-                report.planned += 1
-                self._remember(record, action, "planned")
-                return None
+            if verdict.overridden:
+                record.detail = f"operator override: {verdict.objection}"
+            elif action.op is Op.RAW_SHELL:
+                record.detail = "raw shell permitted by profile"
 
         try:
             description = dispatcher.dispatch(action)
@@ -400,7 +427,13 @@ class Executor:
             report.executed += 1
             self._dispatched_mutations += 1
         record.outcome = StepOutcome.EXECUTED.value
-        record.detail = description
+        # An operator waiver must not be overwritten by the success text: the
+        # whole value of unguarded mode is being able to read afterwards what it
+        # let through. The trace line carries both the effect and the waiver.
+        if record.detail.startswith("operator override:"):
+            record.detail = f"{description}  [{record.detail}]"
+        else:
+            record.detail = description
         # Stale-cache guard: the post-action observe must not be served a pre-tap dump.
         self.device.invalidate()
         self._remember(record, action, description)
@@ -480,6 +513,12 @@ class Executor:
     def _finalise(self, report: RunReport, terminal: TerminalReason | None, reason: str, started: float) -> RunReport:
         report.terminal = terminal
         report.reason = reason
+        report.guard_profile = self.guard.profile.name
+        report.operator_mode = self.guard.operator_mode
+        if self.guard.operator_mode and not report.operator_overrides:
+            # Zero overrides is worth recording too: it says the operator flag was
+            # armed and simply never needed, which is different from it never set.
+            report.warnings.append("operator mode was armed for this run; no action required an override")
         # STEP_BUDGET is a normal end for "run 25 steps and stop", so it must not
         # be reported the same way as a tripwire: callers key exit codes off this
         # field, and a script that hits its own ceiling is not failing.

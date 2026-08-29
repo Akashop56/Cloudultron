@@ -332,7 +332,11 @@ class FakeTransport:
     """
 
     #: Verbs we will serve. Anything else is a bug in the caller.
-    KNOWN = ("uiautomator", "cat", "input", "am", "dumpsys", "wm", "getprop", "monkey", "pm", "ime", "settings", "cmd")
+    # Includes the routine lifecycle verbs so a test-lab run can be observed
+    # actually reaching the device rather than being swallowed by the fake. `rm`
+    # is deliberately absent: a delete that ever arrives here is news, and the
+    # AssertionError below is the tripwire that makes it loud.
+    KNOWN = ("uiautomator", "cat", "input", "am", "dumpsys", "wm", "getprop", "monkey", "pm", "ime", "settings", "cmd", "reboot", "shutdown", "chmod", "chown", "svc")
 
     def __init__(
         self,
@@ -416,7 +420,7 @@ class FakeTransport:
         return self._dispatch(argv)
 
     def shell_raw(self, command: str, *, timeout: float | None = None) -> "FakeTransport._Result":
-        """Parity with AdbTransport: the guard-escape-hatch path needs this too."""
+        """Parity with AdbTransport: the operator-authorized raw path needs this."""
         return self.shell_string(command, timeout=timeout)
 
     # ---------------------------------------------------------- simulation

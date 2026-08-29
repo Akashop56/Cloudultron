@@ -282,6 +282,13 @@ class LoopDetector:
             if len(hashes) < needed:
                 continue
             tail = hashes[-needed:]
+            # A "cycle" over one distinct value is not a cycle, it is a freeze.
+            # Without this guard four identical screens satisfy the period-2 test
+            # just as well as the period-1 one, and a stuck device gets reported
+            # as ping-ponging -- which sends the operator to a dedup rule when
+            # the real answer is that the taps are landing nowhere.
+            if len(set(tail)) < 2:
+                continue
             if all(tail[i] == tail[i + period] for i in range(period)):
                 return period
         return None

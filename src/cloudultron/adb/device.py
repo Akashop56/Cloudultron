@@ -321,6 +321,20 @@ class AndroidDevice:
         """For guarded, policy-invisible reads (e.g. a policy wanting `dumpsys`)."""
         return self._require(self._try_shell(list(argv)), "shell")
 
+    def shell_raw(self, command: str) -> CommandResult:
+        """Run an already-vetted device-side shell string.
+
+        Not for policies to call: the Executor reaches this only after
+        :meth:`cloudultron.safety.Guard.check_shell` allowed the string, which is
+        why it exists at all -- tokenising here would contradict the point of
+        sending a composed command. The fake transport implements the same method
+        so operator mode is testable without a device.
+        """
+        runner = getattr(self.transport, "shell_raw", None)
+        if runner is None:
+            raise DeviceError("transport does not support raw shell strings")
+        return self._require(runner(command), "raw shell")
+
     def invalidate(self) -> None:
         """Drop the hierarchy cache. Call after any dispatched mutation."""
         self._cached = None

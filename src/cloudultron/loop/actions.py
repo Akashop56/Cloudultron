@@ -267,6 +267,16 @@ class Dispatcher:
         if op is Op.OPEN_URL:
             self.device.start_url(str(args["url"]))
             return f"open {args['url']}"
+        if op is Op.RAW_SHELL:
+            # Reaching here means the guard already allowed the string: the gate
+            # in the engine refuses RAW_SHELL before dispatch in every profile
+            # that forbids it. Run it verbatim -- re-tokenising would defeat the
+            # point of a composed command.
+            command = str(args.get("command", "")).strip()
+            if not command:
+                raise PolicyError("raw shell action carries no command")
+            self.device.shell_raw(command)
+            return f"raw shell: {command[:60]}"
         raise PolicyError(f"dispatcher has no handler for {op.value}")
 
     def _assert_in_view(self, x: int, y: int) -> None:

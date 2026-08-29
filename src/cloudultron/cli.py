@@ -22,11 +22,11 @@ import sys
 from typing import Any
 
 from . import __version__, build_device
-from .config import ExecutorConfig
+from .config import ExecutorConfig, OPERATOR_PROFILE_NAME
 from .errors import CloudultronError, GuardViolation
 from .loop.engine import Executor, StepOutcome, StepRecord
 from .loop.policy import ExplorePolicy, NullPolicy, ScriptedPolicy
-from .safety import Guard, describe_verdict
+from .safety import Guard, describe_verdict, guard_from_config, resolve_profile
 from .ui.hashing import compare, content_hash, structure_hash
 from .ui.render import render_digest, render_tree
 
@@ -45,6 +45,27 @@ _GLOBAL_FLAGS: tuple[tuple[str, dict[str, Any]], ...] = (
     ("-q", "--quiet", {"action": "store_true", "help": "suppress per-step lines"}),
     ("--dry-run", {"dest": "dry_run", "action": "store_true", "default": None, "help": "plan mutations, dispatch none (the default)"}),
     ("--execute", {"dest": "dry_run", "action": "store_false", "help": "actually dispatch mutations"}),
+    (
+        "--guard-profile",
+        {
+            "choices": ("explore", "test-lab", "operator"),
+            "help": "which ruleset gates commands: explore (strict defaults), "
+                    "test-lab (routine device lifecycle allowed), operator (no gating, everything logged)",
+        },
+    ),
+    (
+        "--i-am-the-operator",
+        {
+            "dest": "operator",
+            "action": "store_true",
+            "help": "arm the operator profile: nothing is blocked, everything is classified and logged. "
+                    "Also implies --execute unless --dry-run is given. For a device you own and can afford to lose.",
+        },
+    ),
+    ("--allow", {"dest": "allow_verbs", "action": "append", "default": [], "metavar": "VERB", "help": "release one verb from the profile blocklist (repeatable), e.g. --allow chmod"}),
+    ("--allow-label", {"action": "append", "default": [], "metavar": "LABEL", "help": "authorise one destructive-looking label for this suite (repeatable), e.g. --allow-label 'Buy now'"}),
+    ("--danger-label", {"action": "append", "default": [], "metavar": "SUBSTR", "help": "add an app-specific danger substring (repeatable)"}),
+    ("--no-danger-filter", {"dest": "filter_danger", "action": "store_false", "default": None, "help": "let the explorer click anything on screen"}),
 )
 
 
@@ -149,7 +170,36 @@ def _config_from_args(args: argparse.Namespace) -> ExecutorConfig:
         overrides["stagnation_limit"] = args.stagnation
     if getattr(args, "record", None):
         overrides["record_dir"] = args.record
+    # Provenance decides the default mode, not a global preference. A script an
+    # operator opened and edited has already passed a human, so requiring
+    # --execute on every replay is friction that teaches people to pass the
+    # flag reflexively -- which is how it stops meaning anything. An autonomous
+    # policy has had no review at all, so it keeps the brake.
+    if args.dry_run is None and getattr(args, "policy", None) == "scripted":
+        overrides["dry_run"] = False
+    if getattr(args, "guard_profile", None):
+        overrides["guard_profile"] = args.guard_profile
+    if getattr(args, "operator", False):
+        # Arming the operator profile is never a default and never inherited: it
+        # must be typed on this command line (or set in the environment, which is
+        # the operator's own shell) and it is announced on stderr every run.
+        overrides["guard_profile"] = OPERATOR_PROFILE_NAME
+    if getattr(args, "allow_verbs", None):
+        overrides["allow_verbs"] = tuple(args.allow_verbs)
+    if getattr(args, "allow_label", None):
+        overrides["allow_labels"] = tuple(args.allow_label)
+    if getattr(args, "danger_label", None):
+        overrides["extra_danger_labels"] = tuple(args.danger_label)
+    if getattr(args, "filter_danger", None) is False:
+        overrides["filter_danger_labels"] = False
     config = ExecutorConfig.from_env(overrides)
+    if config.operator_mode and args.dry_run is None:
+        # Arming the operator ruleset by *any* route -- the flag, the named
+        # profile, or the environment -- implies execution. Deciding it per route
+        # meant `--guard-profile operator` silently planned while
+        # `--i-am-the-operator` dispatched, and a preview you did not ask for is
+        # not a safety property. `--dry-run` typed explicitly still wins.
+        config.dry_run = False
     if config.serial is None and not args.mock:
         config.serial = None  # let adb pick the sole device; do not assume :5555
     return config
@@ -303,6 +353,24 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
     return _report(args, payload, lines)
 
 
+def _policy_scope_lines(config: ExecutorConfig) -> list[str]:
+    """Describe how this run's *suite scope* differs from the wandering default.
+
+    Separate from the guard because these change what the explorer chooses to
+    click, not what the executor is permitted to send -- and an authorisation
+    that silently widens scope is the kind of thing an operator should see
+    printed back before the first tap, not infer from a surprise afterwards.
+    """
+    lines: list[str] = []
+    if not config.filter_danger_labels:
+        lines.append("label filter OFF - the explorer will click anything addressable")
+    if config.allow_labels:
+        lines.append("authorised labels: " + ", ".join(config.allow_labels))
+    if config.extra_danger_labels:
+        lines.append("extra danger words: " + ", ".join(config.extra_danger_labels))
+    return lines
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     config = _config_from_args(args)
     device, _ = _make_device(args, config)
@@ -310,14 +378,30 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.policy == "observe":
         policy: Any = NullPolicy()
     elif args.policy == "explore":
-        policy = ExplorePolicy()
+        # The suite's authorisations travel to the policy, not the guard: which
+        # buttons are in scope for *this* test is the test's business.
+        policy = ExplorePolicy(
+            extra_danger_labels=config.extra_danger_labels,
+            allow_labels=config.allow_labels,
+            filter_danger=config.filter_danger_labels,
+        )
     else:
         if not args.script:
             print("error: --policy scripted needs --script FILE", file=sys.stderr)
             return 2
         policy = ScriptedPolicy.from_file(args.script)
 
-    guard = Guard(dry_run=config.dry_run, deny_raw_shell=True)
+    guard = _build_guard(config)
+    if guard is None:
+        return 2
+    provenance_note = ""
+    if args.dry_run is None and args.policy == "scripted" and not config.dry_run:
+        provenance_note = (
+            f"script provenance: {args.script} executes by default; pass --dry-run to plan only"
+        )
+    elif args.dry_run is None and args.policy in {"explore", "observe"} and config.dry_run:
+        provenance_note = "autonomous policy: dry-run by default; pass --execute to dispatch"
+    _announce_ruleset(args, config, guard, note=provenance_note)
     engine = Executor(device, policy, config=config, guard=guard, on_step=None if args.quiet else _printer(args))
 
     until = None
@@ -353,10 +437,64 @@ def cmd_run(args: argparse.Namespace) -> int:
         "report": _report_payload(report),
         "steps": [record.to_dict() for record in engine.steps],
         "policy": getattr(policy, "name", "?"),
+        # The guard's own transcript, including refusals that never became a
+        # dispatch. In operator mode this is the list of what was waived, which
+        # is the only durable record that an unguarded run produced at all.
+        "guard_log": list(guard.log),
     }
     code = 0 if report.status in {"ok", "done"} else 3
     _report(args, payload, lines, code=code)
     return code
+
+
+def _announce_ruleset(
+    args: argparse.Namespace, config: ExecutorConfig, guard: Guard, *, note: str = ""
+) -> None:
+    """Print which ruleset is armed, loudly, before the first command is sent.
+
+    The point is that nobody has to remember what they passed three flags ago, and
+    an unguarded run must be visible in the terminal *and* in the trace. Printed to
+    stderr so --json on stdout stays machine-parseable.
+    """
+    if args.quiet:
+        return
+    stream = sys.stderr
+    if guard.operator_mode:
+        execution_note = (
+            "  Implied --execute: mutations are being sent. Pass --dry-run to plan only."
+            if config.dry_run is False
+            else "  Dry-run still defers mutations (you passed --dry-run explicitly)."
+        )
+        print(
+            "\n".join(
+                [
+                    "=" * 72,
+                    "OPERATOR MODE ARMED - the profile will not block anything.",
+                    "  Every action a policy emits is dispatched, including raw shell",
+                    "  and anything destructive to the device or to accounts on it.",
+                    f"  target: {config.serial or 'the sole adb device'}",
+                    "  Commands are still classified; each waiver is recorded in the trace.",
+                    execution_note,
+                    "=" * 72,
+                ]
+            ),
+            file=stream,
+        )
+    else:
+        changed = (
+            config.guard_profile != "explore"
+            or bool(guard.permitted)
+            or not config.filter_danger_labels
+            or bool(config.allow_labels)
+            or bool(config.extra_danger_labels)
+            or bool(note)
+        )
+        if changed:
+            print(f"guard: {guard.describe()}", file=stream)
+            if note:
+                print(f"       {note}", file=stream)
+    for line in _policy_scope_lines(config):
+        print(f"policy: {line}", file=stream)
 
 
 def _report_payload(report) -> dict[str, Any]:
@@ -375,13 +513,28 @@ def _printer(args: argparse.Namespace):
     return emit
 
 
+def _build_guard(config: ExecutorConfig) -> Guard | None:
+    """Build the guard, turning an unusable flag combination into a usage error.
+
+    A bad `--allow` is a mistake in the command line, not a policy action that got
+    refused, and the two have different exit codes so a script can tell "fix your
+    flags" (2) apart from "the guard stopped something" (4).
+    """
+    try:
+        return guard_from_config(config)
+    except GuardViolation as exc:
+        print(f"cloudultron: error: {exc}", file=sys.stderr)
+        return None
+
+
 def cmd_shell(args: argparse.Namespace) -> int:
     config = _config_from_args(args)
-    # A human typing `cloudultron shell` has explicitly asked for a command, so
-    # the raw-shell path is open here (deny_raw_shell=False) while still being
-    # classified, dry-run-gated, and destructively blocked.
-    guard = Guard(dry_run=config.dry_run, deny_raw_shell=False)
-    verdict = guard.check_shell(args.command)
+    # A human typing `cloudultron shell` has already established the *caller*
+    # question, so this path asks only the content question.
+    guard = _build_guard(config)
+    if guard is None:
+        return 2
+    verdict = guard.check_command(args.command)
     lines = [f"effect  {verdict.effect}", f"verdict {describe_verdict(verdict)}"]
     if not verdict.allowed:
         payload = {

@@ -32,7 +32,18 @@ from .errors import (
 from .loop.actions import Action, Dispatcher, Op
 from .loop.engine import Executor, RunReport, StepOutcome, StepRecord, wait_for_stable
 from .loop.policy import ExplorePolicy, NullPolicy, Observation, Policy, ScriptedPolicy
-from .safety import Effect, Guard, Verdict
+from .safety import (
+    EXPLORE_PROFILE,
+    OPERATOR_PROFILE,
+    PROFILES,
+    TEST_LAB_PROFILE,
+    Effect,
+    Guard,
+    GuardProfile,
+    Verdict,
+    guard_from_config,
+    resolve_profile,
+)
 from .ui.hashing import Diff, LoopDetector, compare, content_hash, structure_hash
 from .ui.model import Rect, Screen, UiNode
 from .ui.parser import parse_hierarchy
@@ -57,8 +68,15 @@ __all__ = [
     "PolicyError",
     # safety
     "Guard",
+    "GuardProfile",
     "Effect",
     "Verdict",
+    "PROFILES",
+    "EXPLORE_PROFILE",
+    "TEST_LAB_PROFILE",
+    "OPERATOR_PROFILE",
+    "resolve_profile",
+    "guard_from_config",
     # ui
     "Screen",
     "UiNode",

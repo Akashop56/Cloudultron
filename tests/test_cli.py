@@ -23,6 +23,145 @@ def invoke(*argv: str) -> tuple[int, str, str]:
     return code, out.getvalue(), err.getvalue()
 
 
+class RulesetTests(unittest.TestCase):
+    """What the operator arms, and whether the run says so out loud."""
+
+    SCRIPT = "scripts/navigate.txt"
+
+    def test_a_reviewed_script_executes_without_a_flag(self):
+        code, out, err = invoke("run", "--mock", "--policy", "scripted", "--script", self.SCRIPT, "--steps", "4", "--settle", "0")
+        self.assertEqual(code, 0)
+        self.assertIn("executes by default", err)
+        self.assertIn("executed", out + err, "the script's taps must have been dispatched")
+
+    def test_an_autonomous_policy_keeps_the_brake(self):
+        code, out, err = invoke("run", "--mock", "--policy", "explore", "--steps", "3", "--settle", "0")
+        self.assertEqual(code, 0)
+        self.assertIn("dry-run by default", err, "the reason for the mode belongs where the flags are")
+        # The report lands on stdout, the step lines on stderr, so a claim about
+        # what ran has to be read from both.
+        both = out + err
+        self.assertIn("planned=3", both)
+        self.assertIn("executed=0", both, "an autonomous policy must not dispatch on its own")
+        self.assertIn("\u25c7 planned", both)
+
+    def test_dry_run_flag_overrides_the_script_provenance(self):
+        code, out, err = invoke(
+            "run", "--mock", "--policy", "scripted", "--script", self.SCRIPT, "--dry-run", "--steps", "3", "--settle", "0"
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("executes by default", err)
+        self.assertIn("planned", out + err)
+
+    def test_the_named_profile_is_announced(self):
+        code, out, err = invoke("run", "--mock", "--guard-profile", "test-lab", "--steps", "2", "--settle", "0")
+        self.assertEqual(code, 0)
+        self.assertIn("profile=test-lab", err)
+
+    def test_operator_mode_announces_itself_on_stderr_and_not_on_stdout(self):
+        code, out, err = invoke(
+            "run", "--mock", "--policy", "scripted", "--script", self.SCRIPT, "--i-am-the-operator", "--steps", "3", "--settle", "0"
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("OPERATOR MODE ARMED", err)
+        self.assertNotIn("OPERATOR MODE", out, "stdout stays the report channel")
+
+    def test_json_stdout_stays_parseable_beside_the_banner(self):
+        code, out, err = invoke(
+            "run", "--mock", "--i-am-the-operator", "--json", "--steps", "2", "--settle", "0", "--record", tempfile.mkdtemp()
+        )
+        self.assertIn("OPERATOR MODE ARMED", err)
+        payload = json.loads(out)  # raises if the banner leaked onto stdout
+        self.assertTrue(payload["report"]["operator_mode"])
+        self.assertEqual(payload["report"]["guard_profile"], "operator")
+
+    def test_operator_intent_implies_execute_by_whatever_route_it_is_armed(self):
+        # The flag, the named profile and the environment are the same decision;
+        # if only one of them dispatched, the others would be silently weaker
+        # than they read. An explicit --dry-run still wins over all three.
+        # --policy explore, because the default observe policy only emits no-ops:
+        # a run where nothing was ever a write proves nothing about deferral.
+        for argv in (("--i-am-the-operator",), ("--guard-profile", "operator")):
+            code, out, err = invoke(
+                "run", "--mock", "--policy", "explore", *argv, "--steps", "3", "--settle", "0"
+            )
+            self.assertEqual(code, 0, argv)
+            self.assertIn("executed", err, argv)
+            self.assertIn("Implied --execute", err, argv)
+        code, out, err = invoke(
+            "run", "--mock", "--policy", "explore", "--guard-profile", "operator", "--dry-run",
+            "--steps", "2", "--settle", "0",
+        )
+        self.assertIn("planned", err)
+        self.assertNotIn("executed", err)
+
+    def test_the_lab_profile_does_not_imply_execution(self):
+        # test-lab changes what is *blocked*; it is not a claim that you want
+        # writes on the wire, so dry-run stays wherever the policy provenance left
+        # it. Only operator intent implies execution.
+        code, out, err = invoke("run", "--mock", "--guard-profile", "test-lab", "--steps", "2", "--settle", "0")
+        self.assertEqual(code, 0)
+        self.assertIn("profile=test-lab", err)
+        self.assertIn("dry_run=true", err)
+
+    def test_quiet_suppresses_the_banner_but_not_the_json(self):
+        code, out, err = invoke("run", "--mock", "--i-am-the-operator", "-q", "--json", "--steps", "1", "--settle", "0")
+        self.assertEqual(err.strip(), "")
+        self.assertIn("operator_mode", json.loads(out)["report"])
+
+    def test_authorised_labels_are_echoed_before_the_run(self):
+        code, out, err = invoke(
+            "run", "--mock", "--steps", "1", "--settle", "0", "--allow-label", "Buy now", "--danger-label", "transfer"
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("authorised labels: Buy now", err)
+        self.assertIn("extra danger words: transfer", err)
+
+    def test_turning_the_label_filter_off_is_announced(self):
+        code, out, err = invoke("run", "--mock", "--steps", "1", "--settle", "0", "--no-danger-filter")
+        self.assertEqual(code, 0)
+        self.assertIn("label filter OFF", err)
+
+    def test_a_released_verb_shows_up_in_the_guard_line(self):
+        code, out, err = invoke("run", "--mock", "--steps", "1", "--settle", "0", "--allow", "chmod")
+        self.assertEqual(code, 0)
+        self.assertIn("released: chmod", err)
+
+    def test_the_lab_profile_lets_a_lifecycle_command_through_the_cli(self):
+        # The fake device simulates `reboot` but not `rm`, which is deliberate:
+        # an unexpected destructive verb reaching the transport must abort the
+        # test rather than be silently absorbed by a stub.
+        blocked, _, err = invoke("shell", "--mock", "reboot")
+        self.assertEqual(blocked, 4, "explore must still refuse it")
+        self.assertIn("destructive", err)
+        planned, _, err2 = invoke("shell", "--mock", "--guard-profile", "test-lab", "reboot")
+        self.assertEqual(planned, 4, "test-lab permits the verb but dry-run still defers it")
+        self.assertIn("deferred", err2)
+        code, out, _ = invoke("shell", "--mock", "--guard-profile", "test-lab", "--execute", "reboot")
+        self.assertEqual(code, 0)
+
+    def test_operator_cli_shell_runs_a_blocked_command(self):
+        code, out, err = invoke("shell", "--mock", "--i-am-the-operator", "--execute", "reboot")
+        self.assertEqual(code, 0, "operator mode is the documented way to send the blocked list")
+        self.assertIn("override", out + err)
+
+    def test_a_flag_that_cannot_be_honoured_is_a_usage_error(self):
+        # Exit 2 means "fix the command line"; 4 means "the guard refused an
+        # action". Collapsing them teaches scripts to retry a bad flag.
+        for argv in (("run", "--mock", "--allow", "mkfs"), ("shell", "--mock", "--allow", "wipefs", "ls")):
+            code, out, err = invoke(*argv)
+            self.assertEqual(code, 2, argv)
+            self.assertIn("cannot release", err)
+
+    def test_the_guard_transcript_is_in_the_json_payload(self):
+        # A machine reading the run must not have to re-derive which decisions the
+        # guard made; refusals that never became dispatches exist only here.
+        code, out, err = invoke("run", "--mock", "--policy", "explore", "--steps", "2", "--settle", "0", "--json")
+        payload = json.loads(out)
+        self.assertTrue(payload["guard_log"])
+        self.assertIn("dry-run", " ".join(payload["guard_log"]))
+
+
 class DoctorTests(unittest.TestCase):
     def test_mock_doctor_reports_dry_run_by_default(self):
         code, out, _ = invoke("doctor", "--mock")

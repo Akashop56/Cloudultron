@@ -158,11 +158,96 @@ class DispatcherTests(unittest.TestCase):
         with self.assertRaises(PolicyError):
             bare.dispatch(Action.scroll("down"))
 
-    def test_an_op_the_dispatcher_cannot_handle_is_rejected(self):
-        # RAW_SHELL is deliberately unhandled: only the guard-then-shell path may
-        # run it, so a policy returning one must not acquire it by accident.
+    def test_empty_raw_shell_is_rejected(self):
+        # Refusing here is about a malformed request, not permission: the guard
+        # answers permission. An empty string would otherwise "succeed" having
+        # sent nothing.
         with self.assertRaises(PolicyError):
-            self.dispatcher.dispatch(Action.raw_shell("ls"))
+            self.dispatcher.dispatch(Action.raw_shell("   "))
+
+    def test_allowed_raw_shell_runs_verbatim(self):
+        # Once the guard has let a composed command through, it must not be
+        # re-tokenised -- that is the whole reason a raw string exists.
+        from cloudultron.testing.fake import FakeTransport
+        from cloudultron.adb.device import AndroidDevice
+
+        transport = FakeTransport()
+        device = AndroidDevice(transport)
+        dispatcher = Dispatcher(device, screen=self.hierarchy.screen, indexed=[], size=(1080, 1920))
+        dispatcher.dispatch(Action.raw_shell("input keyevent 3"))
+        self.assertEqual(transport.screen_name(), "launcher")
+        self.assertIn(("keyevent", "3"), transport.events)
+
+
+class DangerFilterTests(unittest.TestCase):
+    """The explorer's label filter is a suite-level allowance, not a lock.
+
+    Each case uses a screen whose only target is the dangerous one, so the
+    assertion is about permission and not about which button sorts first.
+    """
+
+    @staticmethod
+    def _buttons(*labels: str) -> "object":
+        from cloudultron.testing.fake import Element, FakeScreen
+
+        elements = [
+            Element(
+                cls="android.widget.Button",
+                text=label,
+                bounds=(60, 300 + 200 * i, 1000, 430 + 200 * i),
+                clickable=True,
+                taps_to="next",
+            )
+            for i, label in enumerate(labels)
+        ]
+        return parse_hierarchy(FakeScreen(name="shop", width=1080, height=1920, elements=elements).to_dump())[0]
+
+    def test_a_solitary_dangerous_label_is_not_clicked(self):
+        policy = ExplorePolicy()
+        self.assertTrue(policy.decide(_obs(self._buttons("Buy now"), 10)).is_terminal)
+
+    def test_an_authorised_label_becomes_clickable(self):
+        policy = ExplorePolicy(allow_labels=("Buy now",))
+        action = policy.decide(_obs(self._buttons("Buy now"), 10))
+        self.assertEqual(action.op, Op.TAP_INDEX)
+        self.assertIn("Buy now", action.rationale)
+
+    def test_authorisation_is_per_label_not_a_blank_cheque(self):
+        # Releasing "Buy now" must not also release an unrelated "Delete
+        # account" sitting on the same screen.
+        screen = self._buttons("Buy now", "Delete account")
+        policy = ExplorePolicy(allow_labels=("Buy now",))
+        first = policy.decide(_obs(screen, 10))
+        self.assertEqual(first.args.get("index"), 0)
+        second = policy.decide(_obs(screen, 9, diff_level="none"))
+        self.assertNotEqual(second.args.get("index"), 1, "Delete account is still out of scope")
+
+    def test_the_filter_can_be_turned_off_for_a_suite(self):
+        policy = ExplorePolicy(filter_danger=False)
+        self.assertEqual(policy.decide(_obs(self._buttons("Buy now"), 10)).op, Op.TAP_INDEX)
+        self.assertFalse(policy._looks_dangerous("Delete account"))
+
+    def test_app_specific_words_extend_the_default_set(self):
+        # Extends rather than replaces: passing a custom word must not drop the
+        # built-in ones along with it.
+        policy = ExplorePolicy(extra_danger_labels=("transfer",))
+        self.assertTrue(policy.decide(_obs(self._buttons("Transfer money"), 10)).is_terminal)
+        self.assertTrue(policy.decide(_obs(self._buttons("Delete account"), 10)).is_terminal)
+        self.assertFalse(policy._looks_dangerous("Browse catalogue"))
+
+    def test_danger_and_dismiss_are_matched_differently_on_purpose(self):
+        # Deliberate asymmetry: matching is loose for danger, so a button called
+        # "Delete later" is blocked by the word "delete" even though it sounds
+        # harmless, because the cost of a wrong guess is the device's data.
+        # Dismissal uses an exact set so "Continue shopping" is never mistaken
+        # for an "OK" button and auto-pressed.
+        policy = ExplorePolicy()
+        self.assertTrue(policy._looks_dangerous("Permanently delete account"))
+        self.assertTrue(policy._looks_dangerous("Delete later"), "substring matching is on purpose")
+        self.assertNotIn("continue shopping", policy.DISMISS_LABELS)
+        self.assertIn("continue", policy.DISMISS_LABELS)
+        # ...and a danger word from the operator's own list is honoured too.
+        self.assertTrue(ExplorePolicy(extra_danger_labels=("Sweep",))._looks_dangerous("sweep the floor"))
 
 
 class NullPolicyTests(unittest.TestCase):

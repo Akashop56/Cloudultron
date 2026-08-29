@@ -24,6 +24,13 @@ from typing import Any, Mapping
 #: Default TCP endpoint for an emulator reachable over adb over WiFi.
 DEFAULT_REMOTE_SERIAL = "127.0.0.1:5555"
 
+#: Name of the ungated profile in :mod:`cloudultron.safety`. Duplicated as a
+#: literal because ``config`` must not import ``safety`` -- the import-direction
+#: test enforces that ``config`` stays a leaf, and a leaf cannot look up a name
+#: in a module it is not allowed to know about. ``test_safety`` asserts the two
+#: stay equal, so the duplication is checked rather than hoped over.
+OPERATOR_PROFILE_NAME = "operator"
+
 #: Where ``uiautomator dump`` writes on the device before we read it back.
 DEVICE_DUMP_PATH = "/sdcard/window_dump.xml"
 
@@ -55,11 +62,28 @@ class ExecutorConfig:
 
     # --- execution mode --------------------------------------------------
     #: True means: observe freely, *plan* mutations, never dispatch them.
-    #: This is the default. Flipping it off is an explicit act.
+    #: This is the default for autonomous policies. Flipping it off is explicit.
     dry_run: bool = True
-    #: Allow ``Guard`` to classify and block commands (see safety.py). There is
-    #: intentionally no way to turn this off; you can only widen the allowlist.
-    allow_destructive: bool = False
+    #: Which ruleset gates commands: ``explore`` (strict), ``test-lab`` (routine
+    #: device lifecycle permitted), or ``operator`` (nothing gated, everything
+    #: logged). See :mod:`cloudultron.safety`.
+    guard_profile: str = "explore"
+    #: The operator arming. Set only by ``--i-am-the-operator`` or an explicit
+    #: env var -- never inferred, never defaulted on. Classification and logging
+    #: stay on; gating turns off.
+    operator_mode: bool = False
+    #: Extra verbs to release from the profile blocklist (``--allow chmod``).
+    #: Additive widening is supported; it is not a way to install a profile.
+    allow_verbs: tuple[str, ...] = ()
+    #: Element labels an authorised suite may click even though they look
+    #: destructive -- required to test purchase or account-deletion flows.
+    allow_labels: tuple[str, ...] = ()
+    #: Off means the policy may click anything on screen. Default on: an
+    #: autonomous explorer wandering into "Delete account" is not a test.
+    filter_danger_labels: bool = True
+    #: App-specific additions to the explorer's danger substrings (a banking app
+    #: should probably treat "transfer" as one). Extends, never replaces.
+    extra_danger_labels: tuple[str, ...] = ()
 
     # --- the loop --------------------------------------------------------
     max_steps: int = 25
@@ -89,6 +113,24 @@ class ExecutorConfig:
 
     # ---------------------------------------------------------------- env
 
+    def __post_init__(self) -> None:
+        """Keep the two spellings of operator intent from drifting apart.
+
+        ``guard_profile="operator"`` and ``operator_mode=True`` are one decision
+        written two ways. Left independent, a config could say one and mean the
+        other, and readers disagreeing about which is a bug report waiting to
+        happen. Both directions are normalised: arming the profile arms the flag,
+        and the flag alone is recorded as the profile so the run summary names
+        what actually ran.
+        """
+        self._reconcile_operator()
+
+    def _reconcile_operator(self) -> None:
+        if self.guard_profile == OPERATOR_PROFILE_NAME:
+            self.operator_mode = True
+        elif self.operator_mode and self.guard_profile == "explore":
+            self.guard_profile = OPERATOR_PROFILE_NAME
+
     @classmethod
     def from_env(cls, overrides: Mapping[str, Any] | None = None) -> "ExecutorConfig":
         """Build config, letting ``CLOUDULTRON_*`` and ``ANDROID_SERIAL`` intrude."""
@@ -108,6 +150,17 @@ class ExecutorConfig:
         elif mode in {"dry-run", "dry_run", "dry", "plan"}:
             cfg.dry_run = True
 
+        profile = (env.get("CLOUDULTRON_GUARD_PROFILE") or "").strip()
+        if profile:
+            cfg.guard_profile = profile
+        # Arming via environment is allowed because the environment is the
+        # operator's own shell, but it is honoured only for an exact "1"/"yes":
+        # a stray CLOUDULTRON_OPERATOR=true in a shared profile should be loud,
+        # and the CLI banner prints the arming either way.
+        operator = (env.get("CLOUDULTRON_OPERATOR") or "").strip().lower()
+        if operator in {"1", "yes", "true", "on"}:
+            cfg.operator_mode = True
+            cfg.guard_profile = OPERATOR_PROFILE_NAME
         for var, attr, caster in (
             ("CLOUDULTRON_MAX_STEPS", "max_steps", int),
             ("CLOUDULTRON_SETTLE_DELAY", "settle_delay", float),
@@ -122,6 +175,11 @@ class ExecutorConfig:
                 except ValueError:  # a typo'd env var should not be cryptic
                     raise ValueError(f"{var}={raw!r} is not a valid {caster.__name__}") from None
 
+        for var, attr in (("CLOUDULTRON_ALLOW_VERBS", "allow_verbs"), ("CLOUDULTRON_ALLOW_LABELS", "allow_labels")):
+            raw = env.get(var)
+            if raw:
+                setattr(cfg, attr, tuple(v.strip() for v in raw.split(",") if v.strip()))
+
         if overrides:
             for key, value in overrides.items():
                 if value is None:
@@ -129,6 +187,9 @@ class ExecutorConfig:
                 if not hasattr(cfg, key):
                     raise AttributeError(f"ExecutorConfig has no field {key!r}")
                 setattr(cfg, key, value)
+        # from_env mutates fields after construction, so the invariant has to be
+        # re-imposed once the overrides have landed.
+        cfg._reconcile_operator()
         return cfg
 
     # --------------------------------------------------------------- misc

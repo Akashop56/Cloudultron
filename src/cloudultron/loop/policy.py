@@ -194,23 +194,53 @@ class ExplorePolicy:
     name: str = "explore"
     max_depth: int = 4
     allow_scroll: bool = True
+    #: Substrings that mark a target as not-to-be-explored. These are *heuristics
+    #: for unsupervised wandering*, not a security control -- which is why
+    #: ``allow_labels`` and ``filter_danger`` exist: a suite that is testing the
+    #: purchase or account-deletion flow must be able to click them.
+    danger_labels: tuple[str, ...] = (
+        "delete", "remove", "uninstall", "factory reset", "erase", "power off",
+        "reboot", "sell", "buy", "pay", "send", "purchase", "reset",
+    )
+    #: App-specific additions (a banking app should probably treat "transfer" as
+    #: one). Extends rather than replaces, so a caller cannot accidentally clear
+    #: the whole list by passing only its own words.
+    extra_danger_labels: tuple[str, ...] = ()
+    #: Authorised exceptions, matched case-insensitively against the label.
+    allow_labels: tuple[str, ...] = ()
+    #: False means "click anything on screen". Set it deliberately.
+    filter_danger: bool = True
     _tried: set[str] = field(default_factory=set, repr=False)
     _depth: int = field(default=0, repr=False)
     _scroll_attempts: int = field(default=0, repr=False)
 
     DISMISS_LABELS = ("ok", "allow", "got it", "skip", "close", "accept", "dismiss", "no thanks", "not now", "continue")
-    DANGER_LABELS = ("delete", "remove", "uninstall", "factory reset", "erase", "power off", "reboot", "sell", "buy", "pay", "send", "purchase")
 
     def _looks_dangerous(self, label: str) -> bool:
         """Substring match on purpose, and only for the danger list.
 
-        "Delete account" must not be considered tappable just because the button
-        says something longer than "delete". The asymmetry with DISMISS_LABELS
-        (which is matched exactly) is deliberate: guessing wrong about a dismiss
-        button wastes a step, guessing wrong about a destructive one spends an
-        account. So danger is matched loosely and dismissal tightly.
+        "Delete account" must not be auto-explored just because the button says
+        something longer than "delete". The asymmetry with DISMISS_LABELS (exact
+        match) is deliberate: guessing wrong about a dismiss button wastes a step,
+        guessing wrong about a destructive one spends an account.
+
+        An authorised label wins over a danger match, so a suite testing the
+        deletion flow sees the button it came to test. With ``filter_danger`` off
+        the whole notion is skipped -- that is the "click anything" mode, and it is
+        a property of the *suite*, not of the guard.
         """
-        return any(word in label for word in self.DANGER_LABELS)
+        if not self.filter_danger:
+            return False
+        # Normalised here rather than assumed, so the helper is safe to call with
+        # raw node text (a custom policy will) and not only with UiNode.label.
+        label = label.lower()
+        # Every label reaching here is already lowercased (UiNode.label), so the
+        # operator's words have to be compared the same way -- a case-sensitive
+        # allow-list would silently refuse `--allow-label "Buy now"`, and a
+        # refused authorisation reads like a working one that was ignored.
+        if any(word and word.lower() in label for word in self.allow_labels):
+            return False
+        return any(word.lower() in label for word in self.danger_labels + self.extra_danger_labels)
 
     def decide(self, observation: Observation) -> Action:
         from ..ui.render import index_screen  # local import: keeps module import order flat

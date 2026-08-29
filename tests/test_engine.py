@@ -22,17 +22,126 @@ from cloudultron.safety import Guard
 from cloudultron.testing.fake import FakeTransport
 
 
-def run(policy, *, dry_run=True, steps=6, transport=None, config_overrides=None, until=None):
-    """Boot an executor, run it, hand back (engine, report, device)."""
+def run(policy, *, dry_run=True, steps=6, transport=None, config_overrides=None, until=None, guard=None):
+    """Boot an executor, run it, hand back (engine, report, device).
+
+    With no explicit ``guard`` the executor builds one from the config, which is
+    the path a library caller uses, so the default here covers the wiring that
+    matters most rather than only the hand-built case.
+    """
     device, _ = fake_device()
     if transport is not None:
         from cloudultron.adb.device import AndroidDevice
 
         device = AndroidDevice(transport)
     cfg = config(dry_run=dry_run, max_steps=steps, **(config_overrides or {}))
-    engine = Executor(device, policy, config=cfg, guard=Guard(dry_run=dry_run, deny_raw_shell=True))
+    engine = Executor(device, policy, config=cfg, guard=guard)
     report = engine.run(max_steps=steps, until=until)
     return engine, report, device
+
+
+class OneShotPolicy:
+    """Emits one action then reports done, so a test asserts on exactly one step.
+
+    A policy that repeats would loop to the step budget instead, and the counts
+    would say nothing about the gate under test.
+    """
+
+    def __init__(self, action):
+        self.pending = action
+
+    def decide(self, observation):
+        action, self.pending = self.pending, Action.done("test: single action only")
+        return action
+
+
+class GuardProfileWiringTests(unittest.TestCase):
+    """The armed profile decides what a run may do, end to end."""
+
+    @staticmethod
+    def _transport():
+        return FakeTransport()
+
+    def test_explore_profile_refuses_a_policy_composed_command(self):
+        engine, report, _ = run(
+            OneShotPolicy(Action.raw_shell("reboot")), dry_run=False, transport=self._transport()
+        )
+        self.assertEqual(report.blocked, 1)
+        self.assertEqual(report.executed, 0)
+        self.assertIn("raw shell is disabled", engine.steps[0].detail)
+        self.assertTrue(engine.steps[0].guard.startswith("block"), engine.steps[0].guard)
+
+    def test_test_lab_profile_sends_a_lifecycle_command_to_the_device(self):
+        transport = self._transport()
+        engine, report, device = run(
+            OneShotPolicy(Action.raw_shell("reboot")),
+            dry_run=False,
+            transport=transport,
+            config_overrides={"guard_profile": "test-lab"},
+        )
+        self.assertEqual(report.executed, 1, "a permitted profile must actually reach the device")
+        self.assertIn("reboot", transport.calls)
+        self.assertTrue(engine.steps[0].guard.startswith("allow [destructive]"), engine.steps[0].guard)
+
+    def test_test_lab_profile_still_refuses_the_wrecking_list(self):
+        transport = self._transport()
+        engine, report, _ = run(
+            OneShotPolicy(Action.raw_shell("rm -rf /sdcard")),
+            dry_run=False,
+            transport=transport,
+            config_overrides={"guard_profile": "test-lab"},
+        )
+        self.assertEqual(report.executed, 0)
+        self.assertEqual(report.blocked, 1)
+        self.assertEqual([c for c in transport.calls if c.startswith("rm ")], [])
+
+    def test_operator_mode_executes_and_records_what_it_waived(self):
+        # `reboot` is the case worth pinning: strict mode blocks it by verb, the
+        # lab permits it, and only the operator runs it -- while still writing
+        # down that it was a waiver. The fake has no `rm` handler on purpose, so
+        # a delete reaching the device would abort the run instead of being
+        # silently accepted by the double.
+        transport = self._transport()
+        engine, report, _ = run(
+            OneShotPolicy(Action.raw_shell("reboot")),
+            dry_run=False,
+            transport=transport,
+            config_overrides={"guard_profile": "operator"},
+        )
+        self.assertEqual(report.executed, 1, "operator mode must not leave the command unplanned")
+        self.assertEqual(report.operator_overrides, 1)
+        self.assertIn("operator override", engine.steps[0].detail)
+        self.assertIn("reboot", engine.steps[0].detail)
+        self.assertIn("reboot", transport.calls)
+        self.assertEqual(report.guard_profile, "operator")
+        self.assertTrue(report.operator_mode)
+        self.assertTrue(
+            engine.steps[0].guard.startswith("override [destructive]"), engine.steps[0].guard
+        )
+        self.assertIn("reboot", engine.steps[0].guard, "the column must say which verb was waived")
+
+    def test_a_run_with_no_operator_waivers_does_not_claim_any(self):
+        engine, report, _ = run(
+            OneShotPolicy(Action.tap(0)),
+            dry_run=False,
+            transport=self._transport(),
+            config_overrides={"guard_profile": "operator"},
+        )
+        self.assertEqual(report.executed, 1)
+        self.assertEqual(report.operator_overrides, 0)
+
+    def test_summary_names_the_ruleset(self):
+        _, report, _ = run(ExplorePolicy(), dry_run=True, config_overrides={"guard_profile": "test-lab"})
+        self.assertIn("guard=test-lab", report.summary())
+
+    def test_summary_names_operator_mode_and_its_waivers(self):
+        _, report, _ = run(
+            OneShotPolicy(Action.raw_shell("reboot")),
+            dry_run=False,
+            transport=self._transport(),
+            config_overrides={"guard_profile": "operator"},
+        )
+        self.assertIn("guard=operator(overrides=1)", report.summary())
 
 
 class DryRunTests(unittest.TestCase):
