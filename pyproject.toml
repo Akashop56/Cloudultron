@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cloudultron"
+version = "0.1.0"
+description = "Android UI automation executor: an observe-think-act loop with structural state-diffing and an enforceable command guard"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+# Deliberately zero runtime dependencies: this is intended to run on Termux
+# and on minimal images where installing lxml/pyyaml is friction or impossible.
+# Everything here is stdlib (xml.etree, hashlib, subprocess, argparse, dataclasses).
+dependencies = []
+
+[project.scripts]
+cloudultron = "cloudultron.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
