@@ -396,7 +396,88 @@ class SetupScriptTests(unittest.TestCase):
         self.assertEqual(check.returncode, 0, check.stderr)
 
 
+class EmulatorAccelerationTests(unittest.TestCase):
+    """The one compose value that has to depend on the host it runs on.
+
+    Software emulation is what makes the emulator boot in a Codespace at all, so
+    the committed default has to be ``-no-accel``. But hard-coding it would give
+    every KVM host on the project a twenty-fold slower boot and no way to notice.
+    The resolution is that the *file* carries the safe default and the *host probe*
+    clears it, which is what these tests pin from both sides.
+    """
+
+    @staticmethod
+    def _android_env() -> dict[str, str]:
+        text = (DEVCONTAINER / "docker-compose.yml").read_text(encoding="utf-8")
+        return compose_children(compose_body(text, "android"), "environment")
+
+    def test_no_accel_is_the_committed_default(self):
+        value = self._android_env()["EMULATOR_ADDITIONAL_ARGS"]
+        self.assertEqual(value, "${EMULATOR_ADDITIONAL_ARGS--no-accel}")
+
+    def test_the_default_must_not_use_the_colon_form(self):
+        # `${VAR:-d}` treats an empty value as unset. The probe writes an empty
+        # value on a KVM host, so the colon would re-add -no-accel and undo the
+        # only reason the probe exists.
+        value = self._android_env()["EMULATOR_ADDITIONAL_ARGS"]
+        self.assertNotIn(":-", value, "empty must mean deliberately empty")
+
+    def test_the_host_probe_is_the_script_that_writes_it(self):
+        command = load_devcontainer()["initializeCommand"]
+        for fragment in ("/dev/kvm", "-no-accel", ".devcontainer/.env", "EMULATOR_ADDITIONAL_ARGS="):
+            self.assertIn(fragment, command)
+        self.assertNotIn("&& echo", command.split("fi")[0] + "fi", "a probe must not be able to fail container creation")
+
+    def test_the_probe_agrees_with_the_host_it_runs_on(self):
+        # Executed for real, in both directions: a temp dir stands in for the
+        # workspace, and the expectation is derived from this machine's own
+        # /dev/kvm, so the test is honest on an accelerated box and on CI.
+        import tempfile
+
+        command = load_devcontainer()["initializeCommand"]
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(["bash", "-c", command], cwd=tmp, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            written = pathlib.Path(tmp) / ".devcontainer" / ".env"
+            self.assertTrue(written.exists(), "the probe must produce the file compose reads")
+            expected = "" if os.path.exists("/dev/kvm") else "-no-accel"
+            self.assertEqual(written.read_text().strip(), f"EMULATOR_ADDITIONAL_ARGS={expected}")
+
+    def test_the_generated_file_is_not_committable(self):
+        ignore = (REPO / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn(".devcontainer/.env", ignore, "a probe file that can be committed can be pushed")
+
+
+class LlmCredentialTests(unittest.TestCase):
+    """How a key reaches the container without ever reaching git."""
+
+    def _env(self, service: str) -> dict[str, str]:
+        text = (DEVCONTAINER / "docker-compose.yml").read_text(encoding="utf-8")
+        return compose_children(compose_body(text, service), "environment")
+
+    def test_the_dev_service_passes_the_key_through_as_a_reference(self):
+        env = self._env("dev")
+        self.assertEqual(env["OPENROUTER_API_KEY"], "${OPENROUTER_API_KEY:-}")
+        self.assertEqual(env["LLM_MODEL"], "${LLM_MODEL-}")
+
+    def test_no_committed_file_contains_a_credential(self):
+        secret = re.compile(r"sk-(?:or-)?[A-Za-z0-9_-]{16,}")
+        targets = [DEVCONTAINER / "docker-compose.yml", DEVCONTAINER / "devcontainer.json", DEVCONTAINER / "Dockerfile"]
+        for path in targets:
+            self.assertIsNone(secret.search(path.read_text(encoding="utf-8")), f"{path.name} looks like it carries a key")
+
+    def test_the_cli_has_no_argument_that_could_carry_a_key(self):
+        cli = (REPO / "src/cloudultron/cli.py").read_text(encoding="utf-8")
+        self.assertNotIn("--api-key", cli)
+        self.assertNotIn("--openrouter", cli)
+        self.assertIn("os.environ", (REPO / "src/cloudultron/loop/llm.py").read_text(encoding="utf-8"))
+
+
 class DocsTests(unittest.TestCase):
+    def test_readme_documents_the_acceleration_tradeoff(self):
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+        self.assertIn("-no-accel", readme, "the compose default needs explaining where people read")
+
     def test_readme_documents_the_sandbox_and_its_files(self):
         readme = (REPO / "README.md").read_text(encoding="utf-8")
         self.assertIn("devcontainer", readme.lower())
@@ -411,6 +492,7 @@ class DocsTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("VNC_PASSWORD=", text, "a VNC password belongs in .env, not in git")
             self.assertNotRegex(text, r"[\w.]+@[\w.]+\.(com|org|io)", "an email address does not belong here")
+            self.assertNotIn("sk-or-", text, "a provider key belongs in the environment, never in this file")
 
     def test_no_mount_pokes_at_a_specific_home_directory(self):
         # Container-internal paths (/home/androidusr is the image's own) are fine;

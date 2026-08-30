@@ -334,3 +334,132 @@ class ScriptValidationTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class LlmPolicyRouteTests(unittest.TestCase):
+    """`--policy llm` must reach the observation loop, and fail cleanly when it cannot.
+
+    These never talk to a provider: the run is pointed at a closed loopback port, which
+    refuses instantly. The wiring is what is under test (argparse choice -> policy
+    construction -> env contract -> banner -> trace), and a test that reached OpenRouter
+    would be a test that only works with a key, a network, and a bill.
+    """
+
+    DEAD = "http://127.0.0.1:1"
+
+    @contextlib.contextmanager
+    def env(self, **values):
+        """Set (or unset, with None) environment variables for one call."""
+        import os
+
+        previous = {key: os.environ.get(key) for key in values}
+        try:
+            for key, value in values.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            yield
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_the_route_is_advertised_in_help(self):
+        # argparse exits rather than returning on --help, which is why this does not
+        # look like the other invoke() calls.
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            main(["run", "--help"])
+        self.assertIn("llm", out.getvalue())
+
+    def test_a_missing_key_stops_the_run_before_anything_happens(self):
+        with self.env(OPENROUTER_API_KEY=None, LLM_MODEL=None, OPENROUTER_BASE_URL=None):
+            code, out, err = invoke("run", "--mock", "--policy", "llm", "--steps", "2")
+        self.assertEqual(code, 2, "no key is a configuration problem, not a device fault")
+        self.assertIn("OPENROUTER_API_KEY", err)
+        self.assertNotIn("Traceback", err, "an operator needs an instruction, not a stack")
+        self.assertNotIn("step ", out + err, "nothing should have been observed or planned yet")
+
+    def test_the_provider_choice_is_announced_like_every_other_loaded_flag(self):
+        with self.env(
+            OPENROUTER_API_KEY="sk-or-test-value-1234", LLM_MODEL="lab/model:free", OPENROUTER_BASE_URL=self.DEAD
+        ):
+            code, out, err = invoke(
+                "run", "--mock", "--policy", "llm", "--goal", "open the wifi toggle", "--steps", "1", "--settle", "0"
+            )
+        both = out + err
+        self.assertIn("model=lab/model:free", err)
+        self.assertIn("goal: open the wifi toggle", err)
+        self.assertIn("fallback=off", err)
+        self.assertIn("dry-run by default", err, "a model-driven policy must keep the brake")
+        self.assertEqual(code, 0, "an unreachable provider is a failed step, not a crashed CLI")
+        self.assertIn("cannot reach", both)
+        # The load-bearing half of that note: nothing left the planning stage. If a
+        # future edit treats `llm` like `scripted` in _config_from_args, this is the
+        # line that fails -- the note alone is only a label.
+        self.assertIn("executed=0", both)
+        # And the run says what it spent, on stderr, where the rest of the run's
+        # narration goes -- a cost that only lives in --json is a cost nobody sees.
+        self.assertIn("request(s) for", err)
+
+    def test_a_paid_model_choice_is_marked_in_the_banner(self):
+        with self.env(OPENROUTER_API_KEY="sk-or-test-value-1234", OPENROUTER_BASE_URL=self.DEAD):
+            invoke("run", "--mock", "--policy", "llm", "--llm-model", "vendor/big-model", "--steps", "1", "--settle", "0")
+        with self.env(OPENROUTER_API_KEY="sk-or-test-value-1234", OPENROUTER_BASE_URL=self.DEAD):
+            _, _, err = invoke("run", "--mock", "--policy", "llm", "--llm-model", "vendor/big-model:free", "--steps", "1", "--settle", "0")
+        self.assertIn("free tier", err)
+
+    def test_cli_flag_overrides_the_model_from_the_environment(self):
+        # The banner is the observable proof: it prints what the policy was built
+        # with, not what was requested.
+        with self.env(
+            OPENROUTER_API_KEY="sk-or-test-value-1234", LLM_MODEL="env/model:free", OPENROUTER_BASE_URL=self.DEAD
+        ):
+            _, _, err = invoke("run", "--mock", "--policy", "llm", "--llm-model", "flag/model:free", "--steps", "1", "--settle", "0")
+        self.assertIn("model=flag/model:free", err)
+        self.assertNotIn("model=env/model", err)
+
+    def test_a_model_run_records_its_refusal_like_any_other_step(self):
+        with tempfile.TemporaryDirectory() as tmp, self.env(
+            OPENROUTER_API_KEY="sk-or-test-value-1234", OPENROUTER_BASE_URL=self.DEAD
+        ):
+            code, out, _ = invoke(
+                "run", "--mock", "--policy", "llm", "--steps", "1", "--settle", "0", "--record", tmp, "--json", "--quiet"
+            )
+            payload = json.loads(out)
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["policy"], "llm", "the report must name the decider")
+            trace = pathlib.Path(payload["report"]["trace_path"])
+            first = json.loads(trace.read_text().splitlines()[0])
+        # Asserted inside the block on purpose: a TemporaryDirectory is gone the
+        # moment it unwinds, and a file check outside it proves nothing.
+        self.assertEqual(first["outcome"], "refused")
+        self.assertIn("cannot reach", first["detail"])
+
+    def test_the_llm_accounting_lands_in_the_run_json(self):
+        # "What did this cost" has to be answerable from the record, not from the
+        # provider's dashboard -- and the record is the part people paste into bugs.
+        secret = "sk-or-accounting-check"
+        with self.env(OPENROUTER_API_KEY=secret, OPENROUTER_BASE_URL=self.DEAD):
+            code, out, err = invoke("run", "--mock", "--policy", "llm", "--steps", "1", "--settle", "0", "--json", "-q")
+        payload = json.loads(out)
+        self.assertEqual(code, 0)
+        self.assertIn("llm", payload)
+        self.assertEqual(payload["llm"]["model"], "meta-llama/llama-3.1-70b-instruct:free")
+        self.assertGreaterEqual(payload["llm"]["stats"]["requests"], 1)
+        self.assertIn("request(s)", payload["llm"]["summary"])
+        self.assertNotIn(secret, out + err)
+
+    def test_the_key_never_reaches_the_recorded_trace(self):
+        # The reason the key is read from the environment instead of passed around:
+        # `--record` writes config.json, report.json and trace.jsonl side by side,
+        # and a credential on the command line would have landed in all three.
+        secret = "sk-or-do-not-persist-me"
+        with tempfile.TemporaryDirectory() as tmp, self.env(OPENROUTER_API_KEY=secret, OPENROUTER_BASE_URL=self.DEAD):
+            invoke("run", "--mock", "--policy", "llm", "--steps", "1", "--settle", "0", "--record", tmp, "--quiet")
+            written = "\n".join(path.read_text() for path in pathlib.Path(tmp).rglob("*") if path.is_file())
+        self.assertIn("trace.jsonl", written.replace(tmp, ""), "the run should have recorded something to check")
+        self.assertNotIn(secret, written)

@@ -41,11 +41,16 @@ services:
       EMULATOR_DATA_PARTITION: "2200m"
       WEB_VNC: "true"
       WEB_VNC_PORT: "6080"
-      # Empty by default. Set it in the shell that runs compose, or in a `.env`
-      # next to this file (Compose reads it from the project directory), to
-      # e.g. "-no-accel" when there is no KVM: that path is slow
-      # enough to be miserable, but it does boot, which beats not booting.
-      EMULATOR_ADDITIONAL_ARGS: ${EMULATOR_ADDITIONAL_ARGS:-}
+      # Software emulation, so the emulator boots on a Codespace with no KVM.
+      # The default is `-no-accel` because that is the value that *works* in the
+      # most constrained place this ships to; a host that has /dev/kvm gets it
+      # cleared to empty by the devcontainer initializeCommand, which writes
+      # .devcontainer/.env before compose runs. `${VAR-default}` without the
+      # colon is what makes that work: an empty value means "deliberately none",
+      # while an unset one means "nobody probed, take the safe default".
+      # Override by hand with EMULATOR_ADDITIONAL_ARGS="" once you know the host
+      # accelerates -- the difference is minutes versus tens of minutes per boot.
+      EMULATOR_ADDITIONAL_ARGS: ${EMULATOR_ADDITIONAL_ARGS--no-accel}
 
     ports:
       - "6080:6080" # noVNC
@@ -85,6 +90,13 @@ services:
       # terminals, tasks and test discovery at once. run_tests.py sets it itself.
       PYTHONPATH: "/workspaces/cloudultron/src"
       PYTHONUNBUFFERED: "1"
+      # Passthrough only -- this file must never contain a key. In Codespaces the
+      # value comes from a repository or organisation secret, which is injected
+      # into the container environment, so it lands here without touching git.
+      # An unset OPENROUTER_API_KEY makes `--policy llm` exit 2 with a message;
+      # the empty default is what keeps `docker compose up` from complaining.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL-}
 
 volumes:
   android-data:

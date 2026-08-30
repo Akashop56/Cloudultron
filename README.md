@@ -11,7 +11,7 @@ Termux as happily as on a workstation.
 ```bash
 PYTHONPATH=src python3 -m cloudultron doctor --mock    # no device needed
 PYTHONPATH=src python3 -m cloudultron run --mock --policy explore
-python3 run_tests.py                                    # 264 tests, stdlib only
+python3 run_tests.py                                    # 348 tests, stdlib only
 ```
 
 ---
@@ -85,6 +85,7 @@ src/cloudultron/
   loop/
     actions.py    the action vocabulary + Dispatcher (the only writer of state)
     policy.py     Policy protocol + Null / Scripted / Explore
+    llm.py        the model-backed policy: prompt, urllib call, JSON -> Action
     engine.py     the loop, tripwires, budgets, trace
   testing/fake.py a fake that answers adb, so the stack runs with no device
   cli.py          doctor | snapshot | run | shell | script
@@ -123,14 +124,14 @@ not worth a model round-trip.
 |---|---|
 | `doctor [--deep]` | no |
 | `snapshot [--save f] [--tree] [--compare-with f]` | no |
-| `run [--policy observe\|explore\|scripted] [--steps N]` | autonomous policy: only with `--execute`. script: by default |
+| `run [--policy observe\|explore\|scripted\|llm] [--steps N]` | autonomous policy: only with `--execute`. script: by default |
 | `shell 'dumpsys window'` | read-only unless `--execute` |
 | `script FILE [--emit]` | no |
 
 The default mode follows the **provenance of the actions**, not a global setting:
 
-* `--policy explore` / `observe` — the actions came from a model or a wanderer that
-  nobody reviewed, so dry-run stays on and `--execute` must be typed.
+* `--policy explore` / `observe` / `llm` — the actions came from a model or a
+  wanderer that nobody reviewed, so dry-run stays on and `--execute` must be typed.
 * `--policy scripted --script nav.txt` — you opened that file, so a replay
   dispatches by default; pass `--dry-run` to plan instead. Requiring `--execute`
   on every replay just teaches people to type it without reading.
@@ -233,6 +234,79 @@ Environment equivalents for CI: `CLOUDULTRON_GUARD_PROFILE=test-lab`,
 
 ---
 
+---
+
+## Driving it with a model
+
+`--policy llm` hands each step to a chat model. It is one module and no new
+dependency: the request is `urllib.request`, the reply is JSON, so this works in the
+sandbox and on Termux exactly as the rest of the project does.
+
+```bash
+export OPENROUTER_API_KEY=sk-or-v1-...            # the only way to hand it a key
+cloudultron run --policy llm --goal "turn Wi-Fi on" --steps 12 --verbose
+```
+
+| env | default | notes |
+|---|---|---|
+| `OPENROUTER_API_KEY` | — | required. Read from the environment only: never an argument (`ps` and shell history see those), never in the trace |
+| `LLM_MODEL` | `meta-llama/llama-3.1-70b-instruct:free` | any OpenAI-compatible model id |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | point it at a local server or a proxy; the call is `{base}/chat/completions` |
+
+The request is the OpenAI-compatible shape the OpenRouter API documents — bearer auth,
+`messages`, `temperature: 0`, a bounded `max_tokens`, and `response_format:
+{"type": "json_object"}`. That last field is optional on the provider's side and is
+dropped for one retry if an endpoint rejects it, because the JSON contract is restated
+in the system prompt anyway: JSON mode is a convenience, not the parser's precondition.
+
+The default is a `:free` model id and deliberately **not** `openrouter/auto`: the auto
+router picks a model you did not choose, on a meter you did not set. `--policy llm`
+also never implies `--execute` — a model's tap is *planned* until you say otherwise,
+which is the same provenance rule the explorer and the script obey, read the other way.
+
+Other flags: `--goal`, `--llm-model`, `--llm-timeout`, `--llm-max-tokens`,
+`--llm-fallback` (when the provider fails, spend the step on the heuristic explorer
+instead of erroring; those steps are labelled `fallback` in the trace, and a run never
+keeps calling a dead endpoint).
+
+**What it cost.** The reply's `usage` block is summed into a line at the end of the
+run and into `report`'s `llm` key — requests, retries, failures, fallbacks, tokens,
+and dollars when the server reports them. A non-free `LLM_MODEL` is echoed as `billed`
+in the banner rather than refused: the default is a guardrail against surprise, not a
+permission system. If a model id is served by something else, the summary names what
+actually answered.
+
+**What the model is told.** `Observation.to_prompt_dict()` — the indexed digest, the
+diff since the last step, the last six actions with their outcomes, the remaining
+budget, and the engine's own warnings — plus `loop_memory`, which is what the
+observation cannot know by itself: which screen hashes have already been visited, which
+actions are spent on this screen, which screens stopped responding. The system prompt
+states the anti-loop rules those fields exist to enforce. That is on purpose: a prompt
+that disagrees with `LoopDetector` would be a rule the run enforces sometimes and the
+model believes always.
+
+**What the model is allowed to ask for.** Everything in the action vocabulary, including
+`raw_shell`. The policy translates it and hands it over; the armed profile decides
+whether it reaches the device. Under `explore` that step is blocked and recorded; under
+`test-lab` a `reboot` goes out. No second, invisible ruleset lives in the prompt, and
+no "please be careful" is load-bearing anywhere in this file.
+
+**How it fails.** A provider error becomes a `PolicyError`, the step is recorded as
+refused, and three in a row end the run with `policy_errors` rather than spending the
+remaining budget retrying. 429/5xx are retried twice with backoff (`Retry-After`
+obeyed when sent); `temperature=0` and a bounded `max_tokens` keep a step reproducible
+from the trace; a reply wrapped in a fence or in prose is still parsed, and the reason
+a reply was rejected is fed to the next turn so a formatting slip costs one step
+instead of a run.
+
+All of that is tested without a key or the internet. `LLMPolicy(poster=...)` is the
+seam that covers the prompt, the parser, the retry accounting and the guard interplay;
+`RealHttpTests` additionally starts a loopback HTTP server so the actual
+`urllib.request` call — headers on the wire, an `HTTPError` body read, a 429 retried —
+is exercised too. What remains unverified here is the provider's own behaviour: that
+`:free` endpoints exist, rate-limit and answer as documented is OpenRouter's side of
+the contract, not something a test in this repo can hold them to.
+
 ## Sandbox: GitHub Codespaces + Docker-Android
 
 The repo ships a dev container that runs the emulator next to the code, so the
@@ -281,8 +355,19 @@ Knobs, all in `.devcontainer/docker-compose.yml` (or `.env`, which is gitignored
 |---|---|
 | Android version | image tag `emulator_9.0` … `emulator_14.0` (newer tags are the sponsored image) |
 | Device profile | `EMULATOR_DEVICE`, and it must match the image's list verbatim |
-| No KVM but you still want it up | `EMULATOR_ADDITIONAL_ARGS=-no-accel`, then wait a long time |
+| No KVM, still want it up | already the default: compose ships `EMULATOR_ADDITIONAL_ARGS` as `-no-accel`. It boots, slowly |
+| KVM present | nothing to do; `initializeCommand` writes `.devcontainer/.env` with an empty value so acceleration is not traded away for the safe default |
 | Boot patience | `ANDROID_WAIT_SECONDS=900` for the first cold AVD on shared cores |
+
+The two lines above are the same value seen from two hosts, which is why neither is
+hard-coded in the compose file: `${EMULATOR_ADDITIONAL_ARGS--no-accel}` (no colon, so
+an *empty* value means "deliberately none" rather than "unset"). A committed
+`-no-accel` would give every accelerated machine a twenty-fold slower boot and no
+way to notice it.
+
+The model provider's key passes through the same way — `OPENROUTER_API_KEY:
+${OPENROUTER_API_KEY:-}` on the dev service, empty unless the host (or a
+Codespaces secret) provides it. No credential is ever written into this repo.
 
 The dev container also mounts the Docker socket, which is the one bind mount
 Codespaces honours. That is what makes the last line above work: when the emulator
@@ -351,11 +436,15 @@ an action *touches*. That is the payoff of the typed-action boundary.
 
 Working: transport, parsing, hashing, diffing, all three tripwires, the guard and
 its three profiles, provenance-based dry-run gating, trace recording, the fake
-device, the CLI, 264 tests. The `.devcontainer/` sandbox needs `/dev/kvm` on the
-host; without it the emulator cannot boot, and everything above still runs against
-the fake device.
+device, the CLI, 320 tests. The `.devcontainer/` sandbox needs `/dev/kvm` on the host
+to go fast; without it the emulator still boots on software emulation, and everything
+above runs against the fake device.
 
 Not built yet, in rough order of usefulness: screenshot/OCR fallback for
 `FLAG_SECURE` and canvas views; `--record` writing replayable scripts as well as
 traces; `ADBKeyboard` for non-ASCII input (`input text` cannot encode it, so we
-refuse instead of typing mojibake); a real `LLMPolicy`; multi-device fan-out.
+refuse instead of typing mojibake); multi-device fan-out. On the model side the suite
+covers our half — prompt, parser, retries, provenance, and a real `urllib` call against
+a loopback server — but not OpenRouter's half: that the `:free` id resolves, rate-limits
+and answers as documented is a live-endpoint fact no test in this repo can hold them to.
+See `## Driving it with a model`.

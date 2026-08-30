@@ -23,8 +23,10 @@ from typing import Any
 
 from . import __version__, build_device
 from .config import ExecutorConfig, OPERATOR_PROFILE_NAME
-from .errors import CloudultronError, GuardViolation
+from .errors import CloudultronError, GuardViolation, PolicyError
 from .loop.engine import Executor, StepOutcome, StepRecord
+from .loop.llm import DEFAULT_MODEL as LLM_DEFAULT_MODEL
+from .loop.llm import LLMPolicy
 from .loop.policy import ExplorePolicy, NullPolicy, ScriptedPolicy
 from .safety import Guard, describe_verdict, guard_from_config, resolve_profile
 from .ui.hashing import compare, content_hash, structure_hash
@@ -121,9 +123,21 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--steps", type=int, help="max steps (default from config)")
     run.add_argument(
         "--policy",
-        choices=("observe", "explore", "scripted"),
+        choices=("observe", "explore", "scripted", "llm"),
         default="observe",
-        help="observe: never acts; explore: novelty search; scripted: replay --script",
+        help=(
+            "observe: never acts; explore: novelty search; scripted: replay --script; "
+            "llm: ask a model (needs $OPENROUTER_API_KEY)"
+        ),
+    )
+    run.add_argument("--goal", help="what --policy llm is trying to achieve; it decides when to stop")
+    run.add_argument("--llm-model", help=f"model id for --policy llm (default $LLM_MODEL, else {LLM_DEFAULT_MODEL})")
+    run.add_argument("--llm-timeout", type=float, help="seconds to wait for one model reply (default 45)")
+    run.add_argument("--llm-max-tokens", type=int, help="reply budget per step (default 300)")
+    run.add_argument(
+        "--llm-fallback",
+        action="store_true",
+        help="when the provider fails, spend the step on the explore heuristic instead of erroring",
     )
     run.add_argument("--script", help="file of scripted actions, one per line or JSON")
     run.add_argument("--settle", type=float, help="seconds to wait after each dispatched mutation")
@@ -353,6 +367,27 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
     return _report(args, payload, lines)
 
 
+def _llm_record(policy: Any) -> dict[str, Any]:
+    """Cost and call accounting for a model-driven run.
+
+    The key is *absent*, not empty, for every other policy: a reader of
+    report.json has to be able to tell "no model was consulted" from "the model
+    was consulted and reported no usage". Free-tier models return no `cost`, so a
+    zero here would otherwise be indistinguishable from a silent failure to read it.
+    """
+    if getattr(policy, "name", "") != "llm":
+        return {}
+    return {
+        "llm": {
+            "model": policy.model,
+            "endpoint": policy.base_url,
+            "stats": dict(policy.stats),
+            "usage": dict(policy.usage),
+            "summary": policy.summary(),
+        }
+    }
+
+
 def _policy_scope_lines(config: ExecutorConfig) -> list[str]:
     """Describe how this run's *suite scope* differs from the wandering default.
 
@@ -377,6 +412,21 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     if args.policy == "observe":
         policy: Any = NullPolicy()
+    elif args.policy == "llm":
+        try:
+            policy = LLMPolicy.from_env(
+                goal=args.goal,
+                model=args.llm_model,
+                timeout=args.llm_timeout if args.llm_timeout is not None else 45.0,
+                max_tokens=args.llm_max_tokens if args.llm_max_tokens else 300,
+                use_fallback=args.llm_fallback,
+            )
+        except PolicyError as exc:
+            # An absent or unusable key is a configuration problem, not a device
+            # fault and not a policy outcome: say which, before any HTTP request
+            # is attempted and before the emulator is touched at all.
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     elif args.policy == "explore":
         # The suite's authorisations travel to the policy, not the guard: which
         # buttons are in scope for *this* test is the test's business.
@@ -399,9 +449,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         provenance_note = (
             f"script provenance: {args.script} executes by default; pass --dry-run to plan only"
         )
-    elif args.dry_run is None and args.policy in {"explore", "observe"} and config.dry_run:
+    elif args.dry_run is None and args.policy in {"explore", "observe", "llm"} and config.dry_run:
         provenance_note = "autonomous policy: dry-run by default; pass --execute to dispatch"
     _announce_ruleset(args, config, guard, note=provenance_note)
+    if getattr(policy, "name", "") == "llm" and not args.quiet:
+        print(f"llm:     {policy.describe()}", file=sys.stderr)
+        print(f"         goal: {policy.goal}", file=sys.stderr)
     engine = Executor(device, policy, config=config, guard=guard, on_step=None if args.quiet else _printer(args))
 
     until = None
@@ -416,6 +469,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     except CloudultronError as exc:
         print(f"fatal: {exc}", file=sys.stderr)
         return 1
+
+    # The other half of the cost default: a run that used a model says how many
+    # calls it made and what it was billed, so nobody has to open a dashboard to
+    # find out what the loop just did.
+    if getattr(policy, "name", "") == "llm" and not args.quiet:
+        print(f"llm:     {policy.summary()}", file=sys.stderr)
 
     lines: list[str] = []
     # The live printer already streamed each step; re-printing them here would
@@ -437,6 +496,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "report": _report_payload(report),
         "steps": [record.to_dict() for record in engine.steps],
         "policy": getattr(policy, "name", "?"),
+        **_llm_record(policy),
         # The guard's own transcript, including refusals that never became a
         # dispatch. In operator mode this is the list of what was waived, which
         # is the only durable record that an unguarded run produced at all.

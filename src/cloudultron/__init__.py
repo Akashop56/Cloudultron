@@ -31,6 +31,7 @@ from .errors import (
 )
 from .loop.actions import Action, Dispatcher, Op
 from .loop.engine import Executor, RunReport, StepOutcome, StepRecord, wait_for_stable
+from .loop.llm import LLMPolicy
 from .loop.policy import ExplorePolicy, NullPolicy, Observation, Policy, ScriptedPolicy
 from .safety import (
     EXPLORE_PROFILE,
@@ -103,6 +104,7 @@ __all__ = [
     "NullPolicy",
     "ScriptedPolicy",
     "ExplorePolicy",
+    "LLMPolicy",
     # factory
     "build_device",
     "build_transport",

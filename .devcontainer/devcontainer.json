@@ -22,10 +22,12 @@
     "storage": "32gb"
   },
 
-  // Warn, never fail: this runs on the host that will build the containers, before
-  // anything is created, and the compose file deliberately does not hard-require
-  // the device node (see the note there on `privileged`).
-  "initializeCommand": "test -e /dev/kvm && echo '[cloudultron] host has /dev/kvm: the emulator will be hardware-accelerated' || echo '[cloudultron] WARNING: no /dev/kvm on this host. budtmo/docker-android runs QEMU, so the emulator will not boot here. The repo still works: python3 run_tests.py and cloudultron doctor --mock.'",
+  // Runs on the host that builds the containers, before anything is created, and
+  // deliberately cannot fail: it writes the one compose value that depends on the
+  // host (.devcontainer/.env, which is gitignored) instead of hard-coding an
+  // assumption. That is how a Codespace gets `-no-accel` and a KVM workstation
+  // keeps acceleration, from the same committed file.
+  "initializeCommand": "mkdir -p .devcontainer && if [ -e /dev/kvm ]; then printf 'EMULATOR_ADDITIONAL_ARGS=\n' > .devcontainer/.env; echo '[cloudultron] /dev/kvm present: emulator will be hardware-accelerated'; else printf 'EMULATOR_ADDITIONAL_ARGS=-no-accel\n' > .devcontainer/.env; echo '[cloudultron] no /dev/kvm on this host: emulator will use software emulation (slow, but it boots). If it never comes up, everything still works against the fake device: python3 run_tests.py and cloudultron doctor --mock.'; fi",
 
   // 6080 is the one worth clicking: the Android screen itself, in the editor's
   // preview, which is the whole reason to have a GUI emulator in a headless cloud.
