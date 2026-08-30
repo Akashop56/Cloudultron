@@ -11,7 +11,7 @@ Termux as happily as on a workstation.
 ```bash
 PYTHONPATH=src python3 -m cloudultron doctor --mock    # no device needed
 PYTHONPATH=src python3 -m cloudultron run --mock --policy explore
-python3 run_tests.py                                    # 234 tests, stdlib only
+python3 run_tests.py                                    # 264 tests, stdlib only
 ```
 
 ---
@@ -231,6 +231,68 @@ Environment equivalents for CI: `CLOUDULTRON_GUARD_PROFILE=test-lab`,
 `CLOUDULTRON_OPERATOR=1`, `CLOUDULTRON_ALLOW_VERBS=chmod,rm`,
 `CLOUDULTRON_ALLOW_LABELS=Buy now,Delete account`.
 
+---
+
+## Sandbox: GitHub Codespaces + Docker-Android
+
+The repo ships a dev container that runs the emulator next to the code, so the
+executor talks to a real device over a socket instead of against the fake:
+
+```
+.devcontainer/
+  devcontainer.json    which container the editor attaches to, ports, lifecycle
+  docker-compose.yml   android (budtmo/docker-android) + dev (adb, python3)
+  Dockerfile           the tool container: adb, python3, a `cloudultron` shim
+  setup-android.sh     waits for boot, then proves the executor can read the screen
+```
+
+**One requirement decides everything: `/dev/kvm`.** `budtmo/docker-android` runs
+QEMU, and QEMU on an x86 Android system image needs KVM. Check the host before you
+blame the config:
+
+```bash
+ls -l /dev/kvm && kvm-ok          # "KVM acceleration can be used" is what you need
+```
+
+GitHub has never documented nested virtualisation for Codespaces VMs, so **assume
+a Codespace may not have it** and read the first lines the container prints. The
+setup script is written for exactly that case: a host that cannot virtualise warns
+and exits 0 (the editor, the test suite and `--mock` all still work), while a
+device that answers on 5555 and then fails to boot is a real fault and exits 1.
+
+Inside the sandbox:
+
+```bash
+cloudultron doctor --deep               # adb + transport + dump + parse, all of it
+cloudultron snapshot --tree             # what a policy would actually see
+cloudultron run --policy explore --steps 8 --execute
+docker logs --tail 50 "$(docker ps --filter name=android --format '{{.Names}}' | head -1)"
+```
+
+The serial is set once, in compose, as `CLOUDULTRON_ADB_SERIAL=android:5555`. A
+`host:port` serial is what makes the transport run `adb connect` by itself, so no
+step here needs `--serial`, and the same variable works from Termux or CI against
+any other network target. `6080` is forwarded as the noVNC preview; open it and
+watch your own loop press buttons.
+
+Knobs, all in `.devcontainer/docker-compose.yml` (or `.env`, which is gitignored):
+
+| | |
+|---|---|
+| Android version | image tag `emulator_9.0` … `emulator_14.0` (newer tags are the sponsored image) |
+| Device profile | `EMULATOR_DEVICE`, and it must match the image's list verbatim |
+| No KVM but you still want it up | `EMULATOR_ADDITIONAL_ARGS=-no-accel`, then wait a long time |
+| Boot patience | `ANDROID_WAIT_SECONDS=900` for the first cold AVD on shared cores |
+
+The dev container also mounts the Docker socket, which is the one bind mount
+Codespaces honours. That is what makes the last line above work: when the emulator
+misbehaves, the evidence is in its logs, and the socket is how you get to them
+without leaving the terminal.
+
+Nothing in `src/` knows any of this exists — no `if in_container`, no special
+transport. The sandbox is a device on a network, which is the only kind of
+dependency worth committing.
+
 ## Termux
 
 ```bash
@@ -289,7 +351,9 @@ an action *touches*. That is the payoff of the typed-action boundary.
 
 Working: transport, parsing, hashing, diffing, all three tripwires, the guard and
 its three profiles, provenance-based dry-run gating, trace recording, the fake
-device, the CLI, 234 tests.
+device, the CLI, 264 tests. The `.devcontainer/` sandbox needs `/dev/kvm` on the
+host; without it the emulator cannot boot, and everything above still runs against
+the fake device.
 
 Not built yet, in rough order of usefulness: screenshot/OCR fallback for
 `FLAG_SECURE` and canvas views; `--record` writing replayable scripts as well as

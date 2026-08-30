@@ -18,3 +18,6 @@ htmlcov/
 # Kept ignored so a --record run never dirties `git status`.
 runs/
 *.dump.xml
+
+# local overrides for the dev container (extra emulator args, VNC password)
+.devcontainer/.env

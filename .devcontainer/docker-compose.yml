@@ -1,0 +1,90 @@
+# Two containers on one compose network:
+#
+#   android   the emulator (budtmo/docker-android): noVNC on 6080, adbd on 5555
+#   dev       where you work -- the editor attaches here, `adb` and python3 live here
+#
+# The executor reaches the device over the compose network as `android:5555`, which
+# is a host:port serial, so the transport runs `adb connect` for us before the first
+# command (AdbTransport.ensure_connected). Nothing has to be installed or started in
+# the emulator container for that to work, and nothing in this repo needs to know a
+# container is involved.
+#
+# Debugging it: `docker compose -f .devcontainer/docker-compose.yml logs -f android`
+# and, once the emulator is answering, `cloudultron doctor --deep`.
+
+name: cloudultron
+
+services:
+  android:
+    # Tags available in the free channel are emulator_9.0 .. emulator_14.0 (API 28-34);
+    # newer Android versions are the sponsored "pro" image. API 34 is a good default
+    # here: it is what a current Termux install looks like from the outside, and
+    # uiautomator output on it still matches what ui/parser expects.
+    image: budtmo/docker-android:emulator_14.0
+
+    # `privileged` rather than `devices: ["/dev/kvm"]`, and the difference matters:
+    # a declared device that does not exist on the host makes `docker compose up`
+    # fail at container-creation time with "error looking up device /dev/kvm",
+    # which kills the dev container too and leaves no way in to find out why.
+    # Privileged passes /dev/kvm through when the host has it and stays quiet when
+    # it does not -- so the emulator fails, and setup-android.sh can say so in
+    # words you can act on.
+    privileged: true
+
+    environment:
+      # Must be one of the image's built-in profiles, spelled exactly:
+      #   Samsung Galaxy S10/S9/S8/S7 Edge/S7/S6, Nexus 4/5/One/S, Nexus 7, Pixel C
+      # Nexus 5 is the small screen of the set, which is the cheapest thing to
+      # software-render -- and a smaller frame buffer is real time saved per step.
+      EMULATOR_DEVICE: Nexus 5
+      EMULATOR_NO_SKIN: "true"
+      EMULATOR_DATA_PARTITION: "2200m"
+      WEB_VNC: "true"
+      WEB_VNC_PORT: "6080"
+      # Empty by default. Set it in the shell that runs compose, or in a `.env`
+      # next to this file (Compose reads it from the project directory), to
+      # e.g. "-no-accel" when there is no KVM: that path is slow
+      # enough to be miserable, but it does boot, which beats not booting.
+      EMULATOR_ADDITIONAL_ARGS: ${EMULATOR_ADDITIONAL_ARGS:-}
+
+    ports:
+      - "6080:6080" # noVNC
+      - "5555:5555" # adbd, what `adb connect` talks to
+      - "5554:5554" # emulator console (telnet); useful only when 5555 is mute
+
+    # The emulated device is destroyed on `down -v` and survives a restart.
+    # Wipe it deliberately, not accidentally: `docker compose down -v`.
+    volumes:
+      - android-data:/home/androidusr
+
+    # SIGTERM gets to finish the job: an emulator killed mid-write truncates the
+    # AVD's data image, and a corrupt image looks exactly like "the emulator is
+    # just slow" for the next hour.
+    stop_grace_period: 30s
+
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # The repo is mounted by the tooling; keep the target in step with
+    # "workspaceFolder" in devcontainer.json, which a test asserts.
+    volumes:
+      - ..:/workspaces/cloudultron:cached
+    working_dir: /workspaces/cloudultron
+    command: sleep infinity
+    depends_on:
+      - android
+    environment:
+      # The single place the serial is set, so a shell, `cloudultron doctor` and the
+      # test suite all see the same target. See config.py: CLOUDULTRON_ADB_SERIAL.
+      # Quoted because a colon inside a plain scalar is a standing invitation for a
+      # reader (human or YAML dialect) to see a nested mapping that is not there.
+      CLOUDULTRON_ADB_SERIAL: "android:5555"
+      # Not convenience: the editor's test adapter and any bare `python3 -m
+      # cloudultron` need src/ on sys.path, and this is the one place that reaches
+      # terminals, tasks and test discovery at once. run_tests.py sets it itself.
+      PYTHONPATH: "/workspaces/cloudultron/src"
+      PYTHONUNBUFFERED: "1"
+
+volumes:
+  android-data:
