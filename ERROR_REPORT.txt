@@ -1,0 +1,86 @@
+================================================================================
+CLOUDULTRON ERROR REPORT
+Generated: 2026-08-30
+================================================================================
+
+SUMMARY
+-------
+- Total Tests Run: 348
+- Failures: 1
+- Warnings: 1
+- Test Duration: 20.517s
+
+================================================================================
+SYNTAX WARNING
+================================================================================
+
+File: tests/test_ui_parser.py
+Line: 55
+Type: SyntaxWarning
+
+Message:
+  "is" with 'int' literal. Did you mean "=="?
+
+Code:
+  self.assertFalse(nodes["com.foo:id/pass"].clickable is True and nodes["com.foo:id/pass"].password is 1)
+
+Issue: Using 'is' operator with literal values (True, 1) instead of equality operator '=='
+
+Solution: Replace 'is True' with '== True' and 'is 1' with '== 1'
+
+================================================================================
+TEST FAILURE
+================================================================================
+
+Test Name: test_the_package_imports_in_the_dev_container_without_installing
+Test Class: tests.test_devcontainer.SerialWiringTests
+File: tests/test_devcontainer.py
+Line: 349
+
+Error Type: AssertionError
+
+Message:
+  '/workspaces/cloudultron/src' not found in dockerfile
+
+Details:
+  The test assertion expects the string '/workspaces/cloudultron/src' to be present
+  in the generated Dockerfile content. However, the actual Dockerfile contains
+  a dynamic environment setup script instead:
+  
+  for d in /workspaces/cloudultron /workspaces/Cloudultron; do
+    if [ -d "$d/src/cloudultron" ]; then
+      export PYTHONPATH="$d/src${PYTHONPATH:+:$PYTHONPATH}"
+      break
+    fi
+  done
+
+Expected: The Dockerfile should contain the literal string '/workspaces/cloudultron/src'
+Actual: Uses dynamic path resolution instead
+
+Solution: Either:
+  a) Update the test to check for the dynamic path resolution logic instead
+  b) Update the Dockerfile generation to include the explicit path
+
+================================================================================
+FULL TEST OUTPUT
+================================================================================
+
+Ran 348 tests in 20.517s
+
+Test Results:
+  - Passed: 347
+  - Failed: 1
+  - Warnings: 1
+
+/workspaces/cloudultron/tests/test_ui_parser.py:55: SyntaxWarning: "is" with 'int' literal. Did you mean "=="?
+  self.assertFalse(nodes["com.foo:id/pass"].clickable is True and nodes["com.foo:id/pass"].password is 1)
+
+FAIL: test_the_package_imports_in_the_dev_container_without_installing (tests.test_devcontainer.SerialWiringTests.test_the_package_imports_in_the_dev_container_without_installing)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspaces/cloudultron/tests/test_devcontainer.py", line 349, in test_the_package_imports_in_the_dev_container_without_installing
+    self.assertIn("/workspaces/cloudultron/src", dockerfile)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: '/workspaces/cloudultron/src' not found in 'FROM mcr.microsoft.com/devcontainers/base:ubuntu\n\nENV DEBIAN_FRONTEND=noninteractive\n\nRUN apt-get update && (apt-get install -y --no-install-recommends adb || apt-get install -y --no-install-recommends android-tools-adb) && apt-get install -y --no-install-recommends python3 python3-venv && (apt-get install -y --no-install-recommends docker.io || echo "no docker client") && apt-get clean && rm -rf /var/lib/apt/lists/*\n\nRUN printf \'%s\\n\' \'#!/bin/sh\' \'for d in /workspaces/cloudultron /workspaces/Cloudultron; do if [ -d "$d/src/cloudultron" ]; then export PYTHONPATH="$d/src${PYTHONPATH:+:$PYTHONPATH}"; break; fi; done\' \'exec python3 -m cloudultron "$@"\' > /usr/local/bin/cloudultron && chmod 755 /usr/local/bin/cloudultron\n\nRUN git config --system --add safe.directory /workspaces/cloudultron && git config --system --add safe.directory /workspaces/Cloudultron && git config --system --add safe.directory \'*\'\n'
+
+================================================================================

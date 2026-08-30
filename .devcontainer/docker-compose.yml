@@ -16,11 +16,11 @@ name: cloudultron
 
 services:
   android:
-    # Tags available in the free channel are emulator_9.0 .. emulator_14.0 (API 28-34);
+    # Tags available in the free channel are emulator_9.0 .. emulator_11.0 (API 28-34);
     # newer Android versions are the sponsored "pro" image. API 34 is a good default
     # here: it is what a current Termux install looks like from the outside, and
     # uiautomator output on it still matches what ui/parser expects.
-    image: budtmo/docker-android:emulator_14.0
+    image: budtmo/docker-android:emulator_11.0
 
     # `privileged` rather than `devices: ["/dev/kvm"]`, and the difference matters:
     # a declared device that does not exist on the host makes `docker compose up`

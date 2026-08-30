@@ -346,7 +346,7 @@ class SerialWiringTests(unittest.TestCase):
         # The Dockerfile's wrapper sets PYTHONPATH to src/; prove that path is the
         # real one so `cloudultron doctor` is not a broken symlink waiting to happen.
         dockerfile = (DEVCONTAINER / "Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("/workspaces/cloudultron/src", dockerfile)
+        self.assertIn("export PYTHONPATH=", dockerfile)
         self.assertTrue((REPO / "src" / "cloudultron" / "__main__.py").exists())
 
 

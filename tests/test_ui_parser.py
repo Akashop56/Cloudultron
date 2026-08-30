@@ -52,7 +52,9 @@ class ParseTests(unittest.TestCase):
         nodes = {n.resource_id: n for n in self.screen.walk()}
         self.assertTrue(nodes["com.foo:id/submit"].clickable)
         self.assertTrue(nodes["com.foo:id/pass"].password)
-        self.assertFalse(nodes["com.foo:id/pass"].clickable is True and nodes["com.foo:id/pass"].password is 1)
+        # Verify flags are booleans, not strings or other types
+        self.assertIsInstance(nodes["com.foo:id/pass"].clickable, bool)
+        self.assertIsInstance(nodes["com.foo:id/pass"].password, bool)
         self.assertTrue(nodes["com.foo:id/user"].focused)
         # A disabled node is present but not interactable.
         self.assertFalse(nodes["com.foo:id/dead"].enabled)

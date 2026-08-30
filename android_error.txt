@@ -1,0 +1,29 @@
+2026-08-30 08:24:48,971 INFO supervisord started with pid 8
+2026-08-30 08:24:48,981 INFO supervisord started with pid 10
+2026-08-30 08:24:48,987 INFO supervisord started with pid 9
+2026-08-30 08:24:49,976 INFO spawned: 'd_screen' with pid 11
+2026-08-30 08:24:49,978 INFO spawned: 'd_wm' with pid 12
+2026-08-30 08:24:49,979 INFO spawned: 'vnc_server' with pid 13
+2026-08-30 08:24:49,981 INFO spawned: 'vnc_web' with pid 14
+2026-08-30 08:24:49,989 INFO spawned: 'appium' with pid 15
+2026-08-30 08:24:49,992 INFO spawned: 'device' with pid 16
+2026-08-30 08:24:49,994 INFO spawned: 'android_port_forward' with pid 18
+2026-08-30 08:24:49,999 INFO spawned: 'log_web_shared' with pid 17
+2026-08-30 08:24:50,374 WARN exited: log_web_shared (exit status 0; not expected)
+2026-08-30 08:24:50,389 WARN exited: appium (exit status 0; not expected)
+2026-08-30 08:24:50,632 INFO gave up: appium entered FATAL state, too many start retries too quickly
+2026-08-30 08:24:50,702 WARN exited: d_wm (exit status 1; not expected)
+2026-08-30 08:24:51,633 INFO success: device entered RUNNING state, process has stayed up for > than 1 seconds (startsecs)
+2026-08-30 08:24:51,634 INFO spawned: 'log_web_shared' with pid 44
+2026-08-30 08:24:51,690 INFO success: android_port_forward entered RUNNING state, process has stayed up for > than 1 seconds (startsecs)
+2026-08-30 08:24:51,716 INFO success: d_screen entered RUNNING state, process has stayed up for > than 1 seconds (startsecs)
+2026-08-30 08:24:51,719 INFO spawned: 'd_wm' with pid 48
+2026-08-30 08:24:51,719 INFO success: vnc_server entered RUNNING state, process has stayed up for > than 1 seconds (startsecs)
+2026-08-30 08:24:51,719 INFO success: vnc_web entered RUNNING state, process has stayed up for > than 1 seconds (startsecs)
+2026-08-30 08:24:51,837 WARN exited: log_web_shared (exit status 0; not expected)
+2026-08-30 08:24:53,041 INFO success: d_wm entered RUNNING state, process has stayed up for > than 1 seconds (startsecs)
+2026-08-30 08:24:53,952 INFO spawned: 'log_web_shared' with pid 89
+2026-08-30 08:24:54,105 WARN exited: log_web_shared (exit status 0; not expected)
+2026-08-30 08:24:57,110 INFO spawned: 'log_web_shared' with pid 102
+2026-08-30 08:24:57,262 WARN exited: log_web_shared (exit status 0; not expected)
+2026-08-30 08:24:58,263 INFO gave up: log_web_shared entered FATAL state, too many start retries too quickly
