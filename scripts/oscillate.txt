@@ -1,0 +1,9 @@
+# Pathological script, kept on purpose: ping-pongs between two screens so the
+# oscillation tripwire can be demonstrated and regression-tested.
+launch com.example.app
+tap 0
+tap 2
+tap 0
+tap 2
+tap 0
+tap 2

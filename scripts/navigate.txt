@@ -1,0 +1,8 @@
+# Demo script: open the app, walk to the detail form, type into it.
+# Validate without touching a device:  cloudultron script scripts/navigate.txt
+launch com.example.app
+tap 0
+tap 0
+text Ada Lovelace
+keyevent 66
+back

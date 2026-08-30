@@ -1,0 +1,94 @@
+{
+  // Cloudultron + a Docker-Android emulator, as one reproducible sandbox.
+  //
+  // Everything about the two containers lives in docker-compose.yml; this file
+  // only says which container the editor attaches to, what to forward, and what
+  // to run once the workspace is in place. Dependencies are installed in
+  // ./Dockerfile rather than via "features": feature installers are not applied
+  // to compose services consistently across tools, and a failed feature install
+  // leaves you with a half-built container and no log to read.
+  "name": "Cloudultron + Docker-Android",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "dev",
+  "workspaceFolder": "/workspaces/cloudultron",
+
+  // hostRequirements is read by Codespaces only; local Dev Containers ignores it.
+  // 4 cores / 8 GB is the floor at which a cold AVD boot is bearable -- the
+  // emulator gets its own cores, and the executor spends its time waiting on the
+  // device rather than on Python. Bump to 8 cores if you are doing this all day.
+  "hostRequirements": {
+    "cpus": 4,
+    "memory": "8gb",
+    "storage": "32gb"
+  },
+
+  // Runs on the host that builds the containers, before anything is created, and
+  // deliberately cannot fail: it writes the one compose value that depends on the
+  // host (.devcontainer/.env, which is gitignored) instead of hard-coding an
+  // assumption. That is how a Codespace gets `-no-accel` and a KVM workstation
+  // keeps acceleration, from the same committed file.
+  "initializeCommand": "mkdir -p .devcontainer && if [ -e /dev/kvm ]; then printf 'EMULATOR_ADDITIONAL_ARGS=\n' > .devcontainer/.env; echo '[cloudultron] /dev/kvm present: emulator will be hardware-accelerated'; else printf 'EMULATOR_ADDITIONAL_ARGS=-no-accel\n' > .devcontainer/.env; echo '[cloudultron] no /dev/kvm on this host: emulator will use software emulation (slow, but it boots). If it never comes up, everything still works against the fake device: python3 run_tests.py and cloudultron doctor --mock.'; fi",
+
+  // 6080 is the one worth clicking: the Android screen itself, in the editor's
+  // preview, which is the whole reason to have a GUI emulator in a headless cloud.
+  // 5555/5554 are declared for completeness and deliberately silent -- the
+  // executor talks to `android:5555` across the compose network and never needs
+  // these, and Codespaces forwards HTTP, so a forwarded raw-ADB port is not
+  // something you can `adb connect` to from your laptop anyway.
+  "forwardPorts": [6080, 5555, 5554],
+  "portsAttributes": {
+    "6080": {
+      "label": "Android screen (noVNC)",
+      "protocol": "http",
+      "onAutoForward": "openPreview"
+    },
+    "5555": {
+      "label": "ADB (use android:5555 from inside)",
+      "onAutoForward": "silent"
+    },
+    "5554": {
+      "label": "Emulator console",
+      "onAutoForward": "silent"
+    }
+  },
+
+  // Lets the dev shell read `docker logs` of the emulator container, which is the
+  // only real evidence when it fails to come up. Codespaces ignores bind mounts
+  // with one exception, and this is that exception.
+  "mounts": [
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+  ],
+
+  // onCreateCommand would run before the repository is copied in, and this script
+  // imports the package from src/, so it belongs in postCreate.
+  "postCreateCommand": "bash .devcontainer/setup-android.sh",
+  "postStartCommand": "bash .devcontainer/setup-android.sh --probe",
+
+  "shutdownAction": "stopCompose",
+  "remoteUser": "vscode",
+
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python"],
+      "settings": {
+        // A src layout with no installed package: without these, every import is
+        // a red squiggle in the editor while every import on the command line
+        // works. `-t .` matters for the same reason -- the tests import each other
+        // as `tests.support`, so discovery needs the repo root as the top level.
+        // `import cloudultron` in discovery works because PYTHONPATH is set on the
+        // container in docker-compose.yml, not from here.
+        "python.analysis.extraPaths": ["src", "tests"],
+        "python.testing.pytestEnabled": false,
+        "python.testing.unittestEnabled": true,
+        "python.testing.unittestArgs": ["-v", "-s", "./tests", "-t", ".", "-p", "test_*.py"],
+        "files.exclude": {
+          "**/__pycache__": true,
+          "**/*.pyc": true
+        }
+      }
+    },
+    "codespaces": {
+      "openFiles": ["README.md", ".devcontainer/docker-compose.yml"]
+    }
+  }
+}

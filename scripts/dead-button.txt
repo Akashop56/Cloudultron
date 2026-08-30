@@ -1,0 +1,8 @@
+# Another pathological script: hammers "Buy now", which is enabled and clickable
+# but leads nowhere. Demonstrates stagnation detection with --execute.
+launch com.example.app
+tap 2
+tap 2
+tap 2
+tap 2
+tap 2
